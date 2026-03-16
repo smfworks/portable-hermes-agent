@@ -196,9 +196,39 @@ def _ensure_core_tools():
     return "All custom tools present in _HERMES_CORE_TOOLS"
 
 
+def _ensure_upstream_remote():
+    """Ensure the 'upstream' remote exists pointing to NousResearch."""
+    rc, out, _ = _run_git("remote", "get-url", "upstream")
+    if rc != 0:
+        # No upstream remote — add it
+        _run_git("remote", "add", "upstream",
+                 "https://github.com/NousResearch/hermes-agent.git")
+        return "added"
+    return "exists"
+
+
+def _ensure_git_repo():
+    """Ensure we're in a git repo (fresh zip installs won't have one)."""
+    rc, _, _ = _run_git("status")
+    if rc != 0:
+        # Initialize a git repo
+        _run_git("init")
+        _run_git("add", "-A")
+        _run_git("commit", "-m", "Initial portable install")
+        return "initialized"
+    return "exists"
+
+
 def update_hermes_handler(args: dict, **kwargs) -> str:
-    """Pull latest from upstream and re-inject custom tools."""
+    """Pull latest from NousResearch upstream and re-inject custom tools."""
     results = {"steps": []}
+
+    # 0. Ensure git repo and upstream remote exist
+    repo_status = _ensure_git_repo()
+    results["steps"].append({"git_repo": repo_status})
+
+    upstream_status = _ensure_upstream_remote()
+    results["steps"].append({"upstream_remote": upstream_status})
 
     # 1. Check for uncommitted changes
     rc, out, err = _run_git("status", "--porcelain")
@@ -216,18 +246,28 @@ def update_hermes_handler(args: dict, **kwargs) -> str:
             results["steps"].append({"stash": f"failed: {err}"})
             return json.dumps(results, ensure_ascii=False)
 
-    # 3. Pull
-    rc, out, err = _run_git("pull", "origin", "main", "--ff-only", timeout=120)
+    # 3. Fetch upstream
+    rc, out, err = _run_git("fetch", "upstream", timeout=60)
+    if rc != 0:
+        results["steps"].append({"fetch": f"failed: {err}"})
+        if stashed:
+            _run_git("stash", "pop")
+        return json.dumps(results, ensure_ascii=False)
+    results["steps"].append({"fetch": "success"})
+
+    # 4. Merge upstream/main
+    rc, out, err = _run_git("merge", "upstream/main", "--ff-only", timeout=120)
     if rc == 0:
-        results["steps"].append({"pull": "success", "output": out[:500]})
+        results["steps"].append({"merge": "success", "output": out[:500]})
     else:
-        # Try rebase if ff-only fails
-        rc2, out2, err2 = _run_git("pull", "origin", "main", "--rebase", timeout=120)
+        # Try merge without ff-only (will create merge commit)
+        rc2, out2, err2 = _run_git("merge", "upstream/main",
+                                    "--no-edit", timeout=120)
         if rc2 == 0:
-            results["steps"].append({"pull_rebase": "success", "output": out2[:500]})
+            results["steps"].append({"merge": "success (merge commit)", "output": out2[:500]})
         else:
-            results["steps"].append({"pull": f"failed: {err2[:500]}"})
-            # Pop stash if we stashed
+            results["steps"].append({"merge": f"failed: {err2[:500]}"})
+            _run_git("merge", "--abort")
             if stashed:
                 _run_git("stash", "pop")
             return json.dumps(results, ensure_ascii=False)
@@ -257,12 +297,16 @@ def update_hermes_handler(args: dict, **kwargs) -> str:
 
 
 def check_updates_handler(args: dict, **kwargs) -> str:
-    """Check how many commits behind upstream without pulling."""
-    rc, out, err = _run_git("fetch", "origin", timeout=30)
-    if rc != 0:
-        return json.dumps({"error": f"Fetch failed: {err}"})
+    """Check how many commits behind NousResearch upstream without pulling."""
+    # Ensure git repo and remote exist
+    repo_status = _ensure_git_repo()
+    remote_status = _ensure_upstream_remote()
 
-    rc, out, err = _run_git("log", "--oneline", "HEAD..origin/main")
+    rc, out, err = _run_git("fetch", "upstream", timeout=30)
+    if rc != 0:
+        return json.dumps({"error": f"Fetch upstream failed: {err}"})
+
+    rc, out, err = _run_git("log", "--oneline", "HEAD..upstream/main")
     commits = out.strip().splitlines() if out.strip() else []
 
     rc2, local_out, _ = _run_git("log", "--oneline", "-1")
@@ -272,6 +316,7 @@ def check_updates_handler(args: dict, **kwargs) -> str:
         "current_commit": local_out,
         "recent_upstream": [c for c in commits[:10]],
         "needs_update": len(commits) > 0,
+        "upstream": "NousResearch/hermes-agent",
     }, indent=2, ensure_ascii=False)
 
 

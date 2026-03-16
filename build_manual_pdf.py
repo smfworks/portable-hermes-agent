@@ -17,8 +17,8 @@ class ManualPDF(FPDF):
         if self.page_no() > 1:
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(120, 120, 120)
-            self.cell(0, 10, "Portable Hermes Agent -- User Guide", align="C")
-            self.ln(5)
+            self.cell(0, 8, "Portable Hermes Agent -- User Guide", align="C")
+            self.ln(12)  # Space between header and content
 
     def footer(self):
         self.set_y(-15)
@@ -299,32 +299,84 @@ def build_pdf():
             rows = edata
             if not rows:
                 continue
-            pdf.ln(2)
+            pdf.ln(3)
             num_cols = len(rows[0])
-            col_width = 175 / num_cols
+            table_width = 175
+            start_x = 18
+
+            # Calculate column widths based on content
+            col_max_len = [0] * num_cols
+            for row in rows:
+                for j, cell in enumerate(row):
+                    if j < num_cols:
+                        col_max_len[j] = max(col_max_len[j], len(clean_text(cell)))
+
+            total_len = max(sum(col_max_len), 1)
+            col_widths = [max(20, int(table_width * (l / total_len))) for l in col_max_len]
+            # Adjust to fit exactly
+            diff = table_width - sum(col_widths)
+            col_widths[-1] += diff
+
+            row_height = 7
 
             # Header row
             pdf.set_font("Helvetica", "B", 8)
             pdf.set_fill_color(220, 220, 220)
             pdf.set_text_color(30, 30, 30)
-            pdf.set_x(18)
-            for cell in rows[0]:
-                pdf.cell(col_width, 6, clean_text(cell)[:30], border=1,
-                        fill=True)
+            pdf.set_x(start_x)
+            for j, cell in enumerate(rows[0]):
+                w = col_widths[j] if j < num_cols else 20
+                pdf.cell(w, row_height, " " + clean_text(cell), border=1, fill=True)
             pdf.ln()
 
             # Data rows
             pdf.set_font("Helvetica", "", 8)
-            pdf.set_fill_color(250, 250, 250)
-            for row in rows[1:]:
-                pdf.set_x(18)
+            for ri, row in enumerate(rows[1:]):
+                # Alternate row colors
+                if ri % 2 == 0:
+                    pdf.set_fill_color(248, 248, 248)
+                else:
+                    pdf.set_fill_color(255, 255, 255)
+
+                # Calculate row height based on longest cell
+                max_lines = 1
+                cell_texts = []
                 for j, cell in enumerate(row):
                     text = clean_text(cell)
-                    if len(text) > 35:
-                        text = text[:32] + "..."
-                    pdf.cell(col_width, 5, text, border=1)
-                pdf.ln()
-            pdf.ln(2)
+                    w = col_widths[j] if j < num_cols else 20
+                    # Estimate lines needed (approx 3 chars per mm at font size 8)
+                    chars_per_line = max(1, int(w * 2.5))
+                    lines = max(1, -(-len(text) // chars_per_line))  # ceil div
+                    max_lines = max(max_lines, lines)
+                    cell_texts.append(text)
+
+                rh = max(row_height, max_lines * 4.5)
+                y_before = pdf.get_y()
+
+                # Check if row fits on page
+                if y_before + rh > 275:
+                    pdf.add_page()
+                    y_before = pdf.get_y()
+
+                pdf.set_x(start_x)
+                for j, text in enumerate(cell_texts):
+                    w = col_widths[j] if j < num_cols else 20
+                    x = pdf.get_x()
+                    # Draw cell border and fill
+                    pdf.rect(x, y_before, w, rh, style="DF")
+                    # Write text inside (use multi_cell if wide enough, else truncate)
+                    inner_w = w - 2
+                    if inner_w >= 8:
+                        pdf.set_xy(x + 1, y_before + 1)
+                        pdf.multi_cell(inner_w, 4, text, border=0)
+                    else:
+                        pdf.set_xy(x + 1, y_before + 1)
+                        pdf.cell(inner_w, 4, text[:int(inner_w / 2)])
+                    # Move to next column
+                    pdf.set_xy(x + w, y_before)
+
+                pdf.set_y(y_before + rh)
+            pdf.ln(3)
 
         elif etype == "hr":
             pdf.ln(3)

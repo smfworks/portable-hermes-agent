@@ -40,7 +40,7 @@ def _resolve_lms_base() -> str:
         if base.endswith("/v1"):
             return base[:-3]
         return base
-    return "http://localhost:1234"
+    return "http://localhost:8100"
 
 
 _LMS_HTTP_BASE = _resolve_lms_base()

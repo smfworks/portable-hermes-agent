@@ -29,7 +29,7 @@ def _detect_lmstudio_url() -> str:
     current = os.environ.get("OPENAI_BASE_URL", "")
     if current and ("localhost" in current or "127.0.0.1" in current):
         return current.rstrip("/")
-    return "http://localhost:1234/v1"
+    return "http://localhost:8100/v1"
 
 
 # Known provider base URLs

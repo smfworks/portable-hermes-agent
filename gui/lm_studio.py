@@ -63,7 +63,7 @@ def get_available_gpus() -> List[str]:
 class LMStudioClient:
     """Manages LM Studio SDK connection, model loading, and OpenAI endpoint."""
 
-    def __init__(self, base_url: str = "http://localhost:1234/v1"):
+    def __init__(self, base_url: str = "http://localhost:8100/v1"):
         self.base_url = base_url
         self._sdk_client = None
         self._sdk_api_host = None
@@ -244,7 +244,7 @@ class LMStudioPanel(tk.Toplevel):
 
         Priority: LM_STUDIO_BASE_URL > OPENAI_BASE_URL > default (port 1234).
         """
-        default = "http://localhost:1234/v1"
+        default = "http://localhost:8100/v1"
 
         # Check dedicated LM Studio var first, then OPENAI_BASE_URL
         env_url = os.environ.get("LM_STUDIO_BASE_URL", "").strip()

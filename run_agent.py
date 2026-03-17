@@ -2898,66 +2898,64 @@ class AIAgent:
                                 except (json.JSONDecodeError, ValueError):
                                     continue
 
-                            if chunk.get("model"):
-                                model_name = chunk["model"]
+                                if chunk.get("model"):
+                                    model_name = chunk["model"]
 
-                            choices = chunk.get("choices", [])
-                            if not choices:
-                                continue
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    continue
 
-                            choice = choices[0]
-                            delta = choice.get("delta", {})
+                                choice = choices[0]
+                                delta = choice.get("delta", {})
 
-                            # Reasoning tokens — custom fields that the
-                            # OpenAI SDK would normally discard
-                            r_token = (
-                                delta.get("reasoning_content")
-                                or delta.get("reasoning")
-                                or ""
-                            )
-                            if r_token:
-                                reasoning_parts.append(r_token)
-                                _emit_thinking(r_token)
+                                # Reasoning tokens — custom fields that the
+                                # OpenAI SDK would normally discard
+                                r_token = (
+                                    delta.get("reasoning_content")
+                                    or delta.get("reasoning")
+                                    or ""
+                                )
+                                if r_token:
+                                    reasoning_parts.append(r_token)
+                                    _emit_thinking(r_token)
 
-                            # Inline <think> blocks in content stream
-                            c_token = delta.get("content") or ""
-                            if c_token:
-                                buf += c_token
-                                # Detect <think>...</think> as they stream in
-                                while "<think>" in buf and "</think>" in buf:
-                                    start = buf.index("<think>")
-                                    end = buf.index("</think>") + len("</think>")
-                                    think_text = buf[start + 7:end - 8]
-                                    if think_text.strip():
-                                        reasoning_parts.append(think_text)
-                                        _emit_thinking(think_text)
-                                    buf = buf[:start] + buf[end:]
-                                # Flush confirmed non-think content
-                                if "<think>" not in buf:
-                                    if buf:
-                                        content_parts.append(buf)
-                                    buf = ""
+                                # Inline <think> blocks in content stream
+                                c_token = delta.get("content") or ""
+                                if c_token:
+                                    buf += c_token
+                                    while "<think>" in buf and "</think>" in buf:
+                                        start = buf.index("<think>")
+                                        end = buf.index("</think>") + len("</think>")
+                                        think_text = buf[start + 7:end - 8]
+                                        if think_text.strip():
+                                            reasoning_parts.append(think_text)
+                                            _emit_thinking(think_text)
+                                        buf = buf[:start] + buf[end:]
+                                    if "<think>" not in buf:
+                                        if buf:
+                                            content_parts.append(buf)
+                                        buf = ""
 
-                            # Tool call deltas
-                            for tc_delta in delta.get("tool_calls", []):
-                                idx = tc_delta.get("index", 0)
-                                if idx not in tool_calls_acc:
-                                    tool_calls_acc[idx] = {
-                                        "id": tc_delta.get("id", ""),
-                                        "type": "function",
-                                        "function": {"name": "", "arguments": ""},
-                                    }
-                                entry = tool_calls_acc[idx]
-                                if tc_delta.get("id"):
-                                    entry["id"] = tc_delta["id"]
-                                fn = tc_delta.get("function", {})
-                                if fn.get("name"):
-                                    entry["function"]["name"] += fn["name"]
-                                if fn.get("arguments"):
-                                    entry["function"]["arguments"] += fn["arguments"]
+                                # Tool call deltas
+                                for tc_delta in delta.get("tool_calls", []):
+                                    idx = tc_delta.get("index", 0)
+                                    if idx not in tool_calls_acc:
+                                        tool_calls_acc[idx] = {
+                                            "id": tc_delta.get("id", ""),
+                                            "type": "function",
+                                            "function": {"name": "", "arguments": ""},
+                                        }
+                                    entry = tool_calls_acc[idx]
+                                    if tc_delta.get("id"):
+                                        entry["id"] = tc_delta["id"]
+                                    fn = tc_delta.get("function", {})
+                                    if fn.get("name"):
+                                        entry["function"]["name"] += fn["name"]
+                                    if fn.get("arguments"):
+                                        entry["function"]["arguments"] += fn["arguments"]
 
-                            if choice.get("finish_reason"):
-                                finish_reason = choice["finish_reason"]
+                                if choice.get("finish_reason"):
+                                    finish_reason = choice["finish_reason"]
 
                         # Flush any remaining buffered content
                         if buf:

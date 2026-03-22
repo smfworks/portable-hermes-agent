@@ -266,8 +266,16 @@ def update_hermes_handler(args: dict, **kwargs) -> str:
         if rc2 == 0:
             results["steps"].append({"merge": "success (merge commit)", "output": out2[:500]})
         else:
-            results["steps"].append({"merge": f"failed: {err2[:500]}"})
             _run_git("merge", "--abort")
+            if "unrelated histories" in err2.lower():
+                results["steps"].append({
+                    "merge": "skipped",
+                    "reason": "Unrelated histories — this fork was built from a snapshot, not a git fork. "
+                              "Use 'git cherry-pick <commit>' to pull specific upstream fixes, or "
+                              "compare upstream changes at https://github.com/NousResearch/hermes-agent/commits/main"
+                })
+            else:
+                results["steps"].append({"merge": f"failed: {err2[:500]}"})
             if stashed:
                 _run_git("stash", "pop")
             return json.dumps(results, ensure_ascii=False)

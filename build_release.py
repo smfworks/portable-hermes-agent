@@ -4,7 +4,7 @@ import zipfile
 import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 ZIP_NAME = f"portable-hermes-agent-v{VERSION}.zip"
 ZIP_PATH = os.path.join(os.path.dirname(PROJECT_ROOT), ZIP_NAME)
 
@@ -25,6 +25,11 @@ EXCLUDE_PATHS = {
     ".env",
     "build_release.py",
     "test_script.sh",
+    "smoke_test_all_tools.py",
+    "test_all_tools.py",
+    "agent_debug.log",
+    "bridge_debug.log",
+    "thinking_debug.log",
 }
 
 # File extensions to exclude

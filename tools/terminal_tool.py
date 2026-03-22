@@ -990,21 +990,13 @@ def terminal_tool(
         # Rewrite bare pip/python to use portable Python when available
         hermes_python = os.environ.get("HERMES_PYTHON", "")
         if hermes_python and env_type == "local":
-            import re as _re
-            # Replace bare "pip install ..." with portable python -m pip
-            command = _re.sub(
-                r'^pip\s+', f'"{hermes_python}" -m pip ', command
-            )
-            command = _re.sub(
-                r'^pip3\s+', f'"{hermes_python}" -m pip ', command
-            )
-            # Replace bare "python ..." or "python.exe ..." with portable path
-            command = _re.sub(
-                r'^python(?:\.exe)?\s+', f'"{hermes_python}" ', command
-            )
-            command = _re.sub(
-                r'^python3\s+', f'"{hermes_python}" ', command
-            )
+            quoted_py = f'"{hermes_python}"'
+            if command.startswith("pip ") or command.startswith("pip3 "):
+                command = f'{quoted_py} -m pip {command.split(None, 1)[1]}'
+            elif command.startswith("python ") or command.startswith("python.exe "):
+                command = f'{quoted_py} {command.split(None, 1)[1]}'
+            elif command.startswith("python3 "):
+                command = f'{quoted_py} {command.split(None, 1)[1]}'
 
         # Prepare command for execution
         if background:

@@ -1,42 +1,11 @@
-# Hermes Agent - Context Guide
-
-## Your App Files (you have full read/write access to all of these)
-
-### User Files (customize per user)
-- `~/.hermes/SOUL.md` — Your personality. Users can ask you to change it anytime.
-- `~/.hermes/memories/` — Persistent memories across sessions
-- `~/.hermes/skills/` — All installed skills (88+)
-- `~/.hermes/config.yaml` — User settings
-- `~/.hermes/sessions/` — Past conversation history
-
-### App Files (E:\hermes\)
-- `.env` — API keys (OPENROUTER, FIRECRAWL, FAL, BROWSERBASE). Tell users to restart after changes.
-- `cli-config.yaml` — App configuration
-- `gui/` — Desktop GUI (tkinter app)
-- `skills/` — Bundled skill source files
-- `extensions/` — Portable extension servers:
-  - `extensions/music-server/` — Music Generation (port 9150). Start: `cd extensions/music-server && launcher.bat api`
-  - `extensions/tts-server/` — Text-to-Speech (port 8100). Start: `cd extensions/tts-server && launcher.bat api`
-  - `extensions/comfyui/` — ComfyUI Images (port 8188). Start: `cd extensions/comfyui && launcher.bat`
-- `python_embedded/` — Portable Python 3.13 (all pip installs go here automatically)
-
-### What you can do with these files
-- **Read any file** to answer questions about the app or user's setup
-- **Edit SOUL.md** when users ask to change your personality
-- **Edit .env** when users provide new API keys (remind them to restart)
-- **Start extensions** via terminal tool when users want music/TTS/images
-- **Install packages** via terminal (`pip install X`) — goes to portable Python automatically
-
----
-
-## Developer Guide
+# Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 ## Development Environment
 
 ```bash
-source .venv/bin/activate  # ALWAYS activate before running Python
+source venv/bin/activate  # ALWAYS activate before running Python
 ```
 
 ## Project Structure
@@ -54,6 +23,7 @@ hermes-agent/
 │   ├── prompt_caching.py     # Anthropic prompt caching
 │   ├── auxiliary_client.py   # Auxiliary LLM client (vision, summarization)
 │   ├── model_metadata.py     # Model context lengths, token estimation
+│   ├── models_dev.py         # models.dev registry integration (provider-aware context)
 │   ├── display.py            # KawaiiSpinner, tool preview formatting
 │   ├── skill_commands.py     # Skill slash commands (shared CLI/gateway)
 │   └── trajectory.py         # Trajectory saving helpers
@@ -75,7 +45,7 @@ hermes-agent/
 │   ├── terminal_tool.py  # Terminal orchestration
 │   ├── process_registry.py # Background process management
 │   ├── file_tools.py     # File read/write/search/patch
-│   ├── web_tools.py      # Firecrawl search/extract
+│   ├── web_tools.py      # Web search/extract (Parallel + Firecrawl)
 │   ├── browser_tool.py   # Browserbase browser automation
 │   ├── code_execution_tool.py # execute_code sandbox
 │   ├── delegate_tool.py  # Subagent delegation
@@ -160,14 +130,50 @@ Messages follow OpenAI format: `{"role": "system/user/assistant/tool", ...}`. Re
 - **KawaiiSpinner** (`agent/display.py`) — animated faces during API calls, `┊` activity feed for tool results
 - `load_cli_config()` in cli.py merges hardcoded defaults + user config YAML
 - **Skin engine** (`hermes_cli/skin_engine.py`) — data-driven CLI theming; initialized from `display.skin` config key at startup; skins customize banner colors, spinner faces/verbs/wings, tool prefix, response box, branding text
-- `process_command()` is a method on `HermesCLI` (not in commands.py)
+- `process_command()` is a method on `HermesCLI` — dispatches on canonical command name resolved via `resolve_command()` from the central registry
 - Skill slash commands: `agent/skill_commands.py` scans `~/.hermes/skills/`, injects as **user message** (not system prompt) to preserve prompt caching
 
-### Adding CLI Commands
+### Slash Command Registry (`hermes_cli/commands.py`)
 
-1. Add to `COMMANDS` dict in `hermes_cli/commands.py`
-2. Add handler in `HermesCLI.process_command()` in `cli.py`
-3. For persistent settings, use `save_config_value()` in `cli.py`
+All slash commands are defined in a central `COMMAND_REGISTRY` list of `CommandDef` objects. Every downstream consumer derives from this registry automatically:
+
+- **CLI** — `process_command()` resolves aliases via `resolve_command()`, dispatches on canonical name
+- **Gateway** — `GATEWAY_KNOWN_COMMANDS` frozenset for hook emission, `resolve_command()` for dispatch
+- **Gateway help** — `gateway_help_lines()` generates `/help` output
+- **Telegram** — `telegram_bot_commands()` generates the BotCommand menu
+- **Slack** — `slack_subcommand_map()` generates `/hermes` subcommand routing
+- **Autocomplete** — `COMMANDS` flat dict feeds `SlashCommandCompleter`
+- **CLI help** — `COMMANDS_BY_CATEGORY` dict feeds `show_help()`
+
+### Adding a Slash Command
+
+1. Add a `CommandDef` entry to `COMMAND_REGISTRY` in `hermes_cli/commands.py`:
+```python
+CommandDef("mycommand", "Description of what it does", "Session",
+           aliases=("mc",), args_hint="[arg]"),
+```
+2. Add handler in `HermesCLI.process_command()` in `cli.py`:
+```python
+elif canonical == "mycommand":
+    self._handle_mycommand(cmd_original)
+```
+3. If the command is available in the gateway, add a handler in `gateway/run.py`:
+```python
+if canonical == "mycommand":
+    return await self._handle_mycommand(event)
+```
+4. For persistent settings, use `save_config_value()` in `cli.py`
+
+**CommandDef fields:**
+- `name` — canonical name without slash (e.g. `"background"`)
+- `description` — human-readable description
+- `category` — one of `"Session"`, `"Configuration"`, `"Tools & Skills"`, `"Info"`, `"Exit"`
+- `aliases` — tuple of alternative names (e.g. `("bg",)`)
+- `args_hint` — argument placeholder shown in help (e.g. `"<prompt>"`, `"[name]"`)
+- `cli_only` — only available in the interactive CLI
+- `gateway_only` — only available in messaging platforms
+
+**Adding an alias** requires only adding it to the `aliases` tuple on the existing `CommandDef`. No other file changes needed — dispatch, help text, Telegram menu, Slack mapping, and autocomplete all update automatically.
 
 ---
 
@@ -266,6 +272,7 @@ hermes_cli/skin_engine.py    # SkinConfig dataclass, built-in skins, YAML loader
 | Spinner verbs | `spinner.thinking_verbs` | `display.py` |
 | Spinner wings (optional) | `spinner.wings` | `display.py` |
 | Tool output prefix | `tool_prefix` | `display.py` |
+| Per-tool emojis | `tool_emojis` | `display.py` → `get_tool_emoji()` |
 | Agent name | `branding.agent_name` | `banner.py`, `cli.py` |
 | Welcome message | `branding.welcome` | `cli.py` |
 | Response box label | `branding.response_label` | `cli.py` |
@@ -358,7 +365,10 @@ Rendering bugs in tmux/iTerm2 — ghosting on scroll. Use `curses` (stdlib) inst
 Leaks as literal `?[K` text under `prompt_toolkit`'s `patch_stdout`. Use space-padding: `f"\r{line}{' ' * pad}"`.
 
 ### `_last_resolved_tool_names` is a process-global in `model_tools.py`
-When subagents overwrite this global, `execute_code` calls after delegation may fail with missing tool imports. Known bug.
+`_run_single_child()` in `delegate_tool.py` saves and restores this global around subagent execution. If you add new code that reads this global, be aware it may be temporarily stale during child agent runs.
+
+### DO NOT hardcode cross-tool references in schema descriptions
+Tool schema descriptions must not mention tools from other toolsets by name (e.g., `browser_navigate` saying "prefer web_search"). Those tools may be unavailable (missing API keys, disabled toolset), causing the model to hallucinate calls to non-existent tools. If a cross-reference is needed, add it dynamically in `get_tool_definitions()` in `model_tools.py` — see the `browser_navigate` / `execute_code` post-processing blocks for the pattern.
 
 ### Tests must not write to `~/.hermes/`
 The `_isolate_hermes_home` autouse fixture in `tests/conftest.py` redirects `HERMES_HOME` to a temp dir. Never hardcode `~/.hermes/` paths in tests.
@@ -368,7 +378,7 @@ The `_isolate_hermes_home` autouse fixture in `tests/conftest.py` redirects `HER
 ## Testing
 
 ```bash
-source .venv/bin/activate
+source venv/bin/activate
 python -m pytest tests/ -q          # Full suite (~3000 tests, ~3 min)
 python -m pytest tests/test_model_tools.py -q   # Toolset resolution
 python -m pytest tests/test_cli_init.py -q       # CLI config loading

@@ -249,6 +249,7 @@ TODO_SCHEMA = {
                 "default": False
             }
         },
+        "required": []
     }
 }
 
@@ -256,8 +257,6 @@ TODO_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry
 
-# Fallback store for standalone dispatch (e.g. smoke tests, execute_code sandbox).
-# The live AIAgent overrides this via the store= kwarg.
 _default_todo_store = TodoStore()
 
 registry.register(
@@ -268,4 +267,5 @@ registry.register(
         todos=args.get("todos"), merge=args.get("merge", False),
         store=kw.get("store") or _default_todo_store),
     check_fn=check_todo_requirements,
+    emoji="📋",
 )

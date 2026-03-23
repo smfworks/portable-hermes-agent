@@ -26,11 +26,11 @@ class ToolEntry:
 
     __slots__ = (
         "name", "toolset", "schema", "handler", "check_fn",
-        "requires_env", "is_async", "description",
+        "requires_env", "is_async", "description", "emoji",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
-                 requires_env, is_async, description):
+                 requires_env, is_async, description, emoji):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -39,6 +39,7 @@ class ToolEntry:
         self.requires_env = requires_env
         self.is_async = is_async
         self.description = description
+        self.emoji = emoji
 
 
 class ToolRegistry:
@@ -62,6 +63,7 @@ class ToolRegistry:
         requires_env: list = None,
         is_async: bool = False,
         description: str = "",
+        emoji: str = "",
     ):
         """Register a tool.  Called at module-import time by each tool file."""
         self._tools[name] = ToolEntry(
@@ -73,6 +75,7 @@ class ToolRegistry:
             requires_env=requires_env or [],
             is_async=is_async,
             description=description or schema.get("description", ""),
+            emoji=emoji,
         )
         if check_fn and toolset not in self._toolset_checks:
             self._toolset_checks[toolset] = check_fn
@@ -85,58 +88,24 @@ class ToolRegistry:
         """Return OpenAI-format tool schemas for the requested tool names.
 
         Only tools whose ``check_fn()`` returns True (or have no check_fn)
-        are included.  Runs all check_fn calls in parallel to avoid slow
-        sequential HTTP timeouts when services aren't running.
+        are included.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        # Separate tools with check_fn from those without
-        no_check = []
-        needs_check = []
+        result = []
         for name in sorted(tool_names):
             entry = self._tools.get(name)
             if not entry:
                 continue
             if entry.check_fn:
-                needs_check.append(entry)
-            else:
-                no_check.append(entry)
-
-        # Run all check_fn calls in parallel (max 2s per check → ~2s total)
-        check_results = {}  # name -> bool
-        if needs_check:
-            # Deduplicate check_fn by identity — many tools in a toolset
-            # share the same check_fn so we only call it once.
-            fn_to_names = {}
-            for entry in needs_check:
-                fn_id = id(entry.check_fn)
-                if fn_id not in fn_to_names:
-                    fn_to_names[fn_id] = (entry.check_fn, [])
-                fn_to_names[fn_id][1].append(entry.name)
-
-            def _run_check(fn, names):
                 try:
-                    ok = fn()
+                    if not entry.check_fn():
+                        if not quiet:
+                            logger.debug("Tool %s unavailable (check failed)", name)
+                        continue
                 except Exception:
-                    ok = False
-                return names, ok
-
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                futures = [pool.submit(_run_check, fn, names)
-                           for fn, names in fn_to_names.values()]
-                for fut in as_completed(futures):
-                    names, ok = fut.result()
-                    for n in names:
-                        check_results[n] = ok
-
-        result = []
-        for entry in no_check:
+                    if not quiet:
+                        logger.debug("Tool %s check raised; skipping", name)
+                    continue
             result.append({"type": "function", "function": entry.schema})
-        for entry in needs_check:
-            if check_results.get(entry.name, False):
-                result.append({"type": "function", "function": entry.schema})
-            elif not quiet:
-                logger.debug("Tool %s unavailable (check failed)", entry.name)
         return result
 
     # ------------------------------------------------------------------
@@ -157,7 +126,6 @@ class ToolRegistry:
             logger.warning("TOOL_DISPATCH unknown tool=%s", name)
             return json.dumps({"error": f"Unknown tool: {name}"})
 
-        # Log tool call with truncated args
         args_preview = json.dumps(args, ensure_ascii=False, default=str)
         if len(args_preview) > 500:
             args_preview = args_preview[:500] + "..."
@@ -172,7 +140,6 @@ class ToolRegistry:
                 result = entry.handler(args, **kwargs)
 
             elapsed = _time.monotonic() - t0
-            # Log result preview
             result_preview = result if isinstance(result, str) else json.dumps(result, default=str)
             if len(result_preview) > 500:
                 result_preview = result_preview[:500] + "..."
@@ -199,6 +166,11 @@ class ToolRegistry:
         """Return the toolset a tool belongs to, or None."""
         entry = self._tools.get(name)
         return entry.toolset if entry else None
+
+    def get_emoji(self, name: str, default: str = "⚡") -> str:
+        """Return the emoji for a tool, or *default* if unset."""
+        entry = self._tools.get(name)
+        return (entry.emoji if entry and entry.emoji else default)
 
     def get_tool_to_toolset_map(self) -> Dict[str, str]:
         """Return ``{tool_name: toolset_name}`` for every registered tool."""

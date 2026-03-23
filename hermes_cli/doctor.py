@@ -46,6 +46,7 @@ _PROVIDER_ENV_HINTS = (
     "KIMI_API_KEY",
     "MINIMAX_API_KEY",
     "MINIMAX_CN_API_KEY",
+    "KILOCODE_API_KEY",
 )
 
 
@@ -570,6 +571,8 @@ def run_doctor(args):
         # MiniMax APIs don't support /models endpoint — https://github.com/NousResearch/hermes-agent/issues/811
         ("MiniMax",          ("MINIMAX_API_KEY",),                            None,                                  "MINIMAX_BASE_URL", False),
         ("MiniMax (China)",  ("MINIMAX_CN_API_KEY",),                         None,                                  "MINIMAX_CN_BASE_URL", False),
+        ("AI Gateway",       ("AI_GATEWAY_API_KEY",),                          "https://ai-gateway.vercel.sh/v1/models", "AI_GATEWAY_BASE_URL", True),
+        ("Kilo Code",        ("KILOCODE_API_KEY",),                            "https://api.kilo.ai/api/gateway/models",  "KILOCODE_BASE_URL", True),
     ]
     for _pname, _env_vars, _default_url, _base_env, _supports_health_check in _apikey_providers:
         _key = ""
@@ -714,13 +717,14 @@ def run_doctor(args):
     print(color("◆ Honcho Memory", Colors.CYAN, Colors.BOLD))
 
     try:
-        from honcho_integration.client import HonchoClientConfig, GLOBAL_CONFIG_PATH
+        from honcho_integration.client import HonchoClientConfig, resolve_config_path
         hcfg = HonchoClientConfig.from_global_config()
+        _honcho_cfg_path = resolve_config_path()
 
-        if not GLOBAL_CONFIG_PATH.exists():
+        if not _honcho_cfg_path.exists():
             check_warn("Honcho config not found", f"run: hermes honcho setup")
         elif not hcfg.enabled:
-            check_info("Honcho disabled (set enabled: true in ~/.honcho/config.json to activate)")
+            check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
         elif not hcfg.api_key:
             check_fail("Honcho API key not set", "run: hermes honcho setup")
             issues.append("No Honcho API key — run 'hermes honcho setup'")

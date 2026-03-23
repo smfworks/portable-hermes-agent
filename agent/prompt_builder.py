@@ -56,6 +56,61 @@ def _scan_context_content(content: str, filename: str) -> str:
 
     return content
 
+
+def _find_git_root(start: Path) -> Optional[Path]:
+    """Walk *start* and its parents looking for a ``.git`` directory.
+
+    Returns the directory containing ``.git``, or ``None`` if we hit the
+    filesystem root without finding one.
+    """
+    current = start.resolve()
+    for parent in [current, *current.parents]:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+_HERMES_MD_NAMES = (".hermes.md", "HERMES.md")
+
+
+def _find_hermes_md(cwd: Path) -> Optional[Path]:
+    """Discover the nearest ``.hermes.md`` or ``HERMES.md``.
+
+    Search order: *cwd* first, then each parent directory up to (and
+    including) the git repository root.  Returns the first match, or
+    ``None`` if nothing is found.
+    """
+    stop_at = _find_git_root(cwd)
+    current = cwd.resolve()
+
+    for directory in [current, *current.parents]:
+        for name in _HERMES_MD_NAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+        # Stop walking at the git root (or filesystem root).
+        if stop_at and directory == stop_at:
+            break
+    return None
+
+
+def _strip_yaml_frontmatter(content: str) -> str:
+    """Remove optional YAML frontmatter (``---`` delimited) from *content*.
+
+    The frontmatter may contain structured config (model overrides, tool
+    settings) that will be handled separately in a future PR.  For now we
+    strip it so only the human-readable markdown body is injected into the
+    system prompt.
+    """
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end != -1:
+            # Skip past the closing --- and any trailing newline
+            body = content[end + 4:].lstrip("\n")
+            return body if body else content
+    return content
+
+
 # =========================================================================
 # Constants
 # =========================================================================
@@ -73,9 +128,15 @@ DEFAULT_AGENT_IDENTITY = (
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
     "tool: user preferences, environment details, tool quirks, and stable conventions. "
-    "Memory is injected into every turn, so keep it compact. Do NOT save task progress, "
-    "session outcomes, or completed-work logs to memory; use session_search to recall "
-    "those from past transcripts."
+    "Memory is injected into every turn, so keep it compact and focused on facts that "
+    "will still matter later.\n"
+    "Prioritize what reduces future user steering — the most valuable memory is one "
+    "that prevents the user from having to correct or remind you again. "
+    "User preferences and recurring corrections matter more than procedural task details.\n"
+    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
+    "state to memory; use session_search to recall those from past transcripts. "
+    "If you've discovered a new way to do something, solved a problem that could be "
+    "necessary later, save it as a skill with the skill tool."
 )
 
 SESSION_SEARCH_GUIDANCE = (
@@ -86,8 +147,11 @@ SESSION_SEARCH_GUIDANCE = (
 
 SKILLS_GUIDANCE = (
     "After completing a complex task (5+ tool calls), fixing a tricky error, "
-    "or discovering a non-trivial workflow, consider saving the approach as a "
-    "skill with skill_manage so you can reuse it next time."
+    "or discovering a non-trivial workflow, save the approach as a "
+    "skill with skill_manage so you can reuse it next time.\n"
+    "When using a skill and finding it outdated, incomplete, or wrong, "
+    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
+    "Skills that aren't maintained become liabilities."
 )
 
 PLATFORM_HINTS = {
@@ -142,15 +206,20 @@ PLATFORM_HINTS = {
         "contextually appropriate."
     ),
     "cron": (
-        "You are running as a scheduled cron job. Your final response is automatically "
-        "delivered to the job's configured destination, so do not use send_message to "
-        "send to that same target again. If you want the user to receive something in "
-        "the scheduled destination, put it directly in your final response. Use "
-        "send_message only for additional or different targets."
+        "You are running as a scheduled cron job. There is no user present — you "
+        "cannot ask questions, request clarification, or wait for follow-up. Execute "
+        "the task fully and autonomously, making reasonable decisions where needed. "
+        "Your final response is automatically delivered to the job's configured "
+        "destination — put the primary content directly in your response."
     ),
     "cli": (
         "You are a CLI AI Agent. Try not to use markdown but simple text "
         "renderable inside a terminal."
+    ),
+    "sms": (
+        "You are communicating via SMS. Keep responses concise and use plain text "
+        "only — no markdown, no formatting. SMS messages are limited to ~1600 "
+        "characters, so be brief and direct."
     ),
 }
 
@@ -261,28 +330,34 @@ def build_skills_system_prompt(
     # Each entry: (skill_name, description)
     # Supports sub-categories: skills/mlops/training/axolotl/SKILL.md
     # -> category "mlops/training", skill "axolotl"
+    # Load disabled skill names once for the entire scan
+    try:
+        from tools.skills_tool import _get_disabled_skill_names
+        disabled = _get_disabled_skill_names()
+    except Exception:
+        disabled = set()
+
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     for skill_file in skills_dir.rglob("SKILL.md"):
-        is_compatible, _, desc = _parse_skill_file(skill_file)
+        is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
         if not is_compatible:
-            continue
-        # Skip skills whose conditional activation rules exclude them
-        conditions = _read_skill_conditions(skill_file)
-        if not _skill_should_show(conditions, available_tools, available_toolsets):
             continue
         rel_path = skill_file.relative_to(skills_dir)
         parts = rel_path.parts
         if len(parts) >= 2:
-            # Category is everything between skills_dir and the skill folder
-            # e.g. parts = ("mlops", "training", "axolotl", "SKILL.md")
-            #   → category = "mlops/training", skill_name = "axolotl"
-            # e.g. parts = ("github", "github-auth", "SKILL.md")
-            #   → category = "github", skill_name = "github-auth"
             skill_name = parts[-2]
             category = "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
         else:
             category = "general"
             skill_name = skill_file.parent.name
+        # Respect user's disabled skills config
+        fm_name = frontmatter.get("name", skill_name)
+        if fm_name in disabled or skill_name in disabled:
+            continue
+        # Skip skills whose conditional activation rules exclude them
+        conditions = _read_skill_conditions(skill_file)
+        if not _skill_should_show(conditions, available_tools, available_toolsets):
+            continue
         skills_by_category.setdefault(category, []).append((skill_name, desc))
 
     if not skills_by_category:
@@ -326,6 +401,9 @@ def build_skills_system_prompt(
         "Before replying, scan the skills below. If one clearly matches your task, "
         "load it with skill_view(name) and follow its instructions. "
         "If a skill has issues, fix it with skill_manage(action='patch').\n"
+        "After difficult/iterative tasks, offer to save as a skill. "
+        "If a skill you loaded was missing steps, had wrong commands, or needed "
+        "pitfalls you discovered, update it before finishing.\n"
         "\n"
         "<available_skills>\n"
         + "\n".join(index_lines) + "\n"
@@ -351,19 +429,59 @@ def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE
     return head + marker + tail
 
 
-def build_context_files_prompt(cwd: Optional[str] = None) -> str:
-    """Discover and load context files for the system prompt.
+def load_soul_md() -> Optional[str]:
+    """Load SOUL.md from HERMES_HOME and return its content, or None.
 
-    Discovery: AGENTS.md (recursive), .cursorrules / .cursor/rules/*.mdc,
-    and SOUL.md from HERMES_HOME only. Each capped at 20,000 chars.
+    Used as the agent identity (slot #1 in the system prompt).  When this
+    returns content, ``build_context_files_prompt`` should be called with
+    ``skip_soul=True`` so SOUL.md isn't injected twice.
     """
-    if cwd is None:
-        cwd = os.getcwd()
+    try:
+        from hermes_cli.config import ensure_hermes_home
+        ensure_hermes_home()
+    except Exception as e:
+        logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    cwd_path = Path(cwd).resolve()
-    sections = []
+    soul_path = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "SOUL.md"
+    if not soul_path.exists():
+        return None
+    try:
+        content = soul_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        content = _scan_context_content(content, "SOUL.md")
+        content = _truncate_content(content, "SOUL.md")
+        return content
+    except Exception as e:
+        logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
+        return None
 
-    # AGENTS.md (hierarchical, recursive)
+
+def _load_hermes_md(cwd_path: Path) -> str:
+    """.hermes.md / HERMES.md — walk to git root."""
+    hermes_md_path = _find_hermes_md(cwd_path)
+    if not hermes_md_path:
+        return ""
+    try:
+        content = hermes_md_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return ""
+        content = _strip_yaml_frontmatter(content)
+        rel = hermes_md_path.name
+        try:
+            rel = str(hermes_md_path.relative_to(cwd_path))
+        except ValueError:
+            pass
+        content = _scan_context_content(content, rel)
+        result = f"## {rel}\n\n{content}"
+        return _truncate_content(result, ".hermes.md")
+    except Exception as e:
+        logger.debug("Could not read %s: %s", hermes_md_path, e)
+        return ""
+
+
+def _load_agents_md(cwd_path: Path) -> str:
+    """AGENTS.md — hierarchical, recursive directory walk."""
     top_level_agents = None
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
@@ -371,31 +489,51 @@ def build_context_files_prompt(cwd: Optional[str] = None) -> str:
             top_level_agents = candidate
             break
 
-    if top_level_agents:
-        agents_files = []
-        for root, dirs, files in os.walk(cwd_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__', 'venv', '.venv')]
-            for f in files:
-                if f.lower() == "agents.md":
-                    agents_files.append(Path(root) / f)
-        agents_files.sort(key=lambda p: len(p.parts))
+    if not top_level_agents:
+        return ""
 
-        total_agents_content = ""
-        for agents_path in agents_files:
+    agents_files = []
+    for root, dirs, files in os.walk(cwd_path):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ('node_modules', '__pycache__', 'venv', '.venv')]
+        for f in files:
+            if f.lower() == "agents.md":
+                agents_files.append(Path(root) / f)
+    agents_files.sort(key=lambda p: len(p.parts))
+
+    total_content = ""
+    for agents_path in agents_files:
+        try:
+            content = agents_path.read_text(encoding="utf-8").strip()
+            if content:
+                rel_path = agents_path.relative_to(cwd_path)
+                content = _scan_context_content(content, str(rel_path))
+                total_content += f"## {rel_path}\n\n{content}\n\n"
+        except Exception as e:
+            logger.debug("Could not read %s: %s", agents_path, e)
+
+    if not total_content:
+        return ""
+    return _truncate_content(total_content, "AGENTS.md")
+
+
+def _load_claude_md(cwd_path: Path) -> str:
+    """CLAUDE.md / claude.md — cwd only."""
+    for name in ["CLAUDE.md", "claude.md"]:
+        candidate = cwd_path / name
+        if candidate.exists():
             try:
-                content = agents_path.read_text(encoding="utf-8").strip()
+                content = candidate.read_text(encoding="utf-8").strip()
                 if content:
-                    rel_path = agents_path.relative_to(cwd_path)
-                    content = _scan_context_content(content, str(rel_path))
-                    total_agents_content += f"## {rel_path}\n\n{content}\n\n"
+                    content = _scan_context_content(content, name)
+                    result = f"## {name}\n\n{content}"
+                    return _truncate_content(result, "CLAUDE.md")
             except Exception as e:
-                logger.debug("Could not read %s: %s", agents_path, e)
+                logger.debug("Could not read %s: %s", candidate, e)
+    return ""
 
-        if total_agents_content:
-            total_agents_content = _truncate_content(total_agents_content, "AGENTS.md")
-            sections.append(total_agents_content)
 
-    # .cursorrules
+def _load_cursorrules(cwd_path: Path) -> str:
+    """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
     if cursorrules_file.exists():
@@ -419,27 +557,47 @@ def build_context_files_prompt(cwd: Optional[str] = None) -> str:
             except Exception as e:
                 logger.debug("Could not read %s: %s", mdc_file, e)
 
-    if cursorrules_content:
-        cursorrules_content = _truncate_content(cursorrules_content, ".cursorrules")
-        sections.append(cursorrules_content)
+    if not cursorrules_content:
+        return ""
+    return _truncate_content(cursorrules_content, ".cursorrules")
 
-    # SOUL.md from HERMES_HOME only
-    try:
-        from hermes_cli.config import ensure_hermes_home
-        ensure_hermes_home()
-    except Exception as e:
-        logger.debug("Could not ensure HERMES_HOME before loading SOUL.md: %s", e)
 
-    soul_path = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "SOUL.md"
-    if soul_path.exists():
-        try:
-            content = soul_path.read_text(encoding="utf-8").strip()
-            if content:
-                content = _scan_context_content(content, "SOUL.md")
-                content = _truncate_content(content, "SOUL.md")
-                sections.append(content)
-        except Exception as e:
-            logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
+def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+    """Discover and load context files for the system prompt.
+
+    Priority (first found wins — only ONE project context type is loaded):
+      1. .hermes.md / HERMES.md  (walk to git root)
+      2. AGENTS.md / agents.md   (recursive directory walk)
+      3. CLAUDE.md / claude.md   (cwd only)
+      4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
+
+    SOUL.md from HERMES_HOME is independent and always included when present.
+    Each context source is capped at 20,000 chars.
+
+    When *skip_soul* is True, SOUL.md is not included here (it was already
+    loaded via ``load_soul_md()`` for the identity slot).
+    """
+    if cwd is None:
+        cwd = os.getcwd()
+
+    cwd_path = Path(cwd).resolve()
+    sections = []
+
+    # Priority-based project context: first match wins
+    project_context = (
+        _load_hermes_md(cwd_path)
+        or _load_agents_md(cwd_path)
+        or _load_claude_md(cwd_path)
+        or _load_cursorrules(cwd_path)
+    )
+    if project_context:
+        sections.append(project_context)
+
+    # SOUL.md from HERMES_HOME only — skip when already loaded as identity
+    if not skip_soul:
+        soul_content = load_soul_md()
+        if soul_content:
+            sections.append(soul_content)
 
     if not sections:
         return ""

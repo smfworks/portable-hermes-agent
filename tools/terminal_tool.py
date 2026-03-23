@@ -31,15 +31,12 @@ import json
 import logging
 import os
 import platform
-import signal
 import sys
 import time
 import threading
 import atexit
 import shutil
 import subprocess
-import tempfile
-import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -51,7 +48,7 @@ logger = logging.getLogger(__name__)
 # The terminal tool polls this during command execution so it can kill
 # long-running subprocesses immediately instead of blocking until timeout.
 # ---------------------------------------------------------------------------
-from tools.interrupt import set_interrupt as set_interrupt_event, is_interrupted, _interrupt_event
+from tools.interrupt import is_interrupted, _interrupt_event
 
 
 # Add mini-swe-agent to path if not installed. In git worktrees the populated
@@ -75,9 +72,9 @@ DISK_USAGE_WARNING_THRESHOLD_GB = float(os.getenv("TERMINAL_DISK_WARNING_GB", "5
 
 def _check_disk_usage_warning():
     """Check if total disk usage exceeds warning threshold."""
-    scratch_dir = _get_scratch_dir()
-    
     try:
+        scratch_dir = _get_scratch_dir()
+
         # Get total size of hermes directories
         total_bytes = 0
         import glob
@@ -98,6 +95,7 @@ def _check_disk_usage_warning():
         
         return False
     except Exception as e:
+        logger.debug("Disk usage warning check failed: %s", e, exc_info=True)
         return False
 
 
@@ -130,11 +128,8 @@ def set_approval_callback(cb):
 
 # Dangerous command detection + approval now consolidated in tools/approval.py
 from tools.approval import (
-    detect_dangerous_command as _detect_dangerous_command,
     check_dangerous_command as _check_dangerous_command_impl,
     check_all_command_guards as _check_all_guards_impl,
-    load_permanent_allowlist as _load_permanent_allowlist,
-    DANGEROUS_PATTERNS,
 )
 
 
@@ -468,23 +463,36 @@ def _get_env_config() -> Dict[str, Any]:
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     env_type = os.getenv("TERMINAL_ENV", "local")
     
+    mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
+
     # Default cwd: local uses the host's current directory, everything
     # else starts in the user's home (~ resolves to whatever account
     # is running inside the container/remote).
     if env_type == "local":
         default_cwd = os.getcwd()
+    elif env_type == "ssh":
+        default_cwd = "~"
     else:
         default_cwd = "/root"
-    
+
     # Read TERMINAL_CWD but sanity-check it for container backends.
-    # If the CWD looks like a host-local path that can't exist inside a
-    # container/sandbox, fall back to the backend's own default. This
-    # catches the case where cli.py (or .env) leaked the host's CWD.
-    # SSH is excluded since /home/ paths are valid on remote machines.
+    # If Docker cwd passthrough is explicitly enabled, remap the host path to
+    # /workspace and track the original host path separately. Otherwise keep the
+    # normal sandbox behavior and discard host paths.
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
-    if env_type in ("modal", "docker", "singularity", "daytona") and cwd:
+    host_cwd = None
+    host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
+    if env_type == "docker" and mount_docker_cwd:
+        docker_cwd_source = os.getenv("TERMINAL_CWD") or os.getcwd()
+        candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
+        if (
+            any(candidate.startswith(p) for p in host_prefixes)
+            or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
+        ):
+            host_cwd = candidate
+            cwd = "/workspace"
+    elif env_type in ("modal", "docker", "singularity", "daytona") and cwd:
         # Host paths that won't exist inside containers
-        host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
         if any(cwd.startswith(p) for p in host_prefixes) and cwd != default_cwd:
             logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
                         "(host path won't exist in sandbox). Using %r instead.",
@@ -494,10 +502,13 @@ def _get_env_config() -> Dict[str, Any]:
     return {
         "env_type": env_type,
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
+        "docker_forward_env": _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON"),
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
         "daytona_image": os.getenv("TERMINAL_DAYTONA_IMAGE", default_image),
         "cwd": cwd,
+        "host_cwd": host_cwd,
+        "docker_mount_cwd_to_workspace": mount_docker_cwd,
         "timeout": _parse_env_var("TERMINAL_TIMEOUT", "180"),
         "lifetime_seconds": _parse_env_var("TERMINAL_LIFETIME_SECONDS", "300"),
         # SSH-specific config
@@ -505,6 +516,14 @@ def _get_env_config() -> Dict[str, Any]:
         "ssh_user": os.getenv("TERMINAL_SSH_USER", ""),
         "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
         "ssh_key": os.getenv("TERMINAL_SSH_KEY", ""),
+        # Persistent shell: SSH defaults to the config-level persistent_shell
+        # setting (true by default for non-local backends); local is always opt-in.
+        # Per-backend env vars override if explicitly set.
+        "ssh_persistent": os.getenv(
+            "TERMINAL_SSH_PERSISTENT",
+            os.getenv("TERMINAL_PERSISTENT_SHELL", "true"),
+        ).lower() in ("true", "1", "yes"),
+        "local_persistent": os.getenv("TERMINAL_LOCAL_PERSISTENT", "false").lower() in ("true", "1", "yes"),
         # Container resource config (applies to docker, singularity, modal, daytona -- ignored for local/ssh)
         "container_cpu": _parse_env_var("TERMINAL_CONTAINER_CPU", "1", float, "number"),
         "container_memory": _parse_env_var("TERMINAL_CONTAINER_MEMORY", "5120"),     # MB (default 5GB)
@@ -516,7 +535,9 @@ def _get_env_config() -> Dict[str, Any]:
 
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
-                        task_id: str = "default"):
+                        local_config: dict = None,
+                        task_id: str = "default",
+                        host_cwd: str = None):
     """
     Create an execution environment from mini-swe-agent.
     
@@ -528,6 +549,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         ssh_config: SSH connection config (for env_type="ssh")
         container_config: Resource config for container backends (cpu, memory, disk, persistent)
         task_id: Task identifier for environment reuse and snapshot keying
+        host_cwd: Optional host working directory to bind into Docker when explicitly enabled
         
     Returns:
         Environment instance with execute() method
@@ -538,9 +560,12 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     disk = cc.get("container_disk", 51200)
     persistent = cc.get("container_persistent", True)
     volumes = cc.get("docker_volumes", [])
+    docker_forward_env = cc.get("docker_forward_env", [])
 
     if env_type == "local":
-        return _LocalEnvironment(cwd=cwd, timeout=timeout)
+        lc = local_config or {}
+        return _LocalEnvironment(cwd=cwd, timeout=timeout,
+                                 persistent=lc.get("persistent", False))
     
     elif env_type == "docker":
         return _DockerEnvironment(
@@ -548,6 +573,9 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             cpu=cpu, memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
             volumes=volumes,
+            host_cwd=host_cwd,
+            auto_mount_cwd=cc.get("docker_mount_cwd_to_workspace", False),
+            forward_env=docker_forward_env,
         )
     
     elif env_type == "singularity":
@@ -596,6 +624,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             key_path=ssh_config.get("key", ""),
             cwd=cwd,
             timeout=timeout,
+            persistent=ssh_config.get("persistent", False),
         )
 
     else:
@@ -925,6 +954,7 @@ def terminal_tool(
                                 "user": config.get("ssh_user", ""),
                                 "port": config.get("ssh_port", 22),
                                 "key": config.get("ssh_key", ""),
+                                "persistent": config.get("ssh_persistent", False),
                             }
 
                         container_config = None
@@ -935,6 +965,13 @@ def terminal_tool(
                                 "container_disk": config.get("container_disk", 51200),
                                 "container_persistent": config.get("container_persistent", True),
                                 "docker_volumes": config.get("docker_volumes", []),
+                                "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
+                            }
+
+                        local_config = None
+                        if env_type == "local":
+                            local_config = {
+                                "persistent": config.get("local_persistent", False),
                             }
 
                         new_env = _create_environment(
@@ -944,7 +981,9 @@ def terminal_tool(
                             timeout=effective_timeout,
                             ssh_config=ssh_config,
                             container_config=container_config,
+                            local_config=local_config,
                             task_id=effective_task_id,
+                            host_cwd=config.get("host_cwd"),
                         )
                     except ImportError as e:
                         return json.dumps({
@@ -988,17 +1027,6 @@ def terminal_tool(
                     "error": approval.get("message", fallback_msg),
                     "status": "blocked"
                 }, ensure_ascii=False)
-
-        # Rewrite bare pip/python to use portable Python when available
-        hermes_python = os.environ.get("HERMES_PYTHON", "")
-        if hermes_python and env_type == "local":
-            quoted_py = f'"{hermes_python}"'
-            if command.startswith("pip ") or command.startswith("pip3 "):
-                command = f'{quoted_py} -m pip {command.split(None, 1)[1]}'
-            elif command.startswith("python ") or command.startswith("python.exe "):
-                command = f'{quoted_py} {command.split(None, 1)[1]}'
-            elif command.startswith("python3 "):
-                command = f'{quoted_py} {command.split(None, 1)[1]}'
 
         # Prepare command for execution
         if background:
@@ -1051,12 +1079,23 @@ def terminal_tool(
                         result_data["check_interval_note"] = (
                             f"Requested {check_interval}s raised to minimum 30s"
                         )
+                    watcher_platform = os.getenv("HERMES_SESSION_PLATFORM", "")
+                    watcher_chat_id = os.getenv("HERMES_SESSION_CHAT_ID", "")
+                    watcher_thread_id = os.getenv("HERMES_SESSION_THREAD_ID", "")
+
+                    # Store on session for checkpoint persistence
+                    proc_session.watcher_platform = watcher_platform
+                    proc_session.watcher_chat_id = watcher_chat_id
+                    proc_session.watcher_thread_id = watcher_thread_id
+                    proc_session.watcher_interval = effective_interval
+
                     process_registry.pending_watchers.append({
                         "session_id": proc_session.id,
                         "check_interval": effective_interval,
                         "session_key": session_key,
-                        "platform": os.getenv("HERMES_SESSION_PLATFORM", ""),
-                        "chat_id": os.getenv("HERMES_SESSION_CHAT_ID", ""),
+                        "platform": watcher_platform,
+                        "chat_id": watcher_chat_id,
+                        "thread_id": watcher_thread_id,
                     })
 
                 return json.dumps(result_data, ensure_ascii=False)
@@ -1330,4 +1369,5 @@ registry.register(
     schema=TERMINAL_SCHEMA,
     handler=_handle_terminal,
     check_fn=check_terminal_requirements,
+    emoji="💻",
 )

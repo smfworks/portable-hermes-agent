@@ -26,8 +26,7 @@ def _make_fake_popen(captured: dict):
         proc = MagicMock()
         proc.poll.return_value = 0
         proc.returncode = 0
-        proc.stdout = iter([])
-        proc.stdout.close = lambda: None
+        proc.stdout = MagicMock(__iter__=lambda s: iter([]), __next__=lambda s: (_ for _ in ()).throw(StopIteration))
         proc.stdin = MagicMock()
         return proc
     return fake_popen
@@ -86,6 +85,7 @@ class TestProviderEnvBlocklist:
             "KIMI_API_KEY": "kimi-key",
             "MINIMAX_API_KEY": "mm-key",
             "MINIMAX_CN_API_KEY": "mmcn-key",
+            "DEEPSEEK_API_KEY": "deepseek-key",
         }
         result_env = _run_with_env(extra_os_env=registry_vars)
 
@@ -96,7 +96,6 @@ class TestProviderEnvBlocklist:
         """Extra provider vars not in PROVIDER_REGISTRY must also be blocked."""
         extra_provider_vars = {
             "GOOGLE_API_KEY": "google-key",
-            "DEEPSEEK_API_KEY": "deepseek-key",
             "MISTRAL_API_KEY": "mistral-key",
             "GROQ_API_KEY": "groq-key",
             "TOGETHER_API_KEY": "together-key",
@@ -129,6 +128,9 @@ class TestProviderEnvBlocklist:
             "GH_TOKEN": "gh_alias_secret",
             "GATEWAY_ALLOW_ALL_USERS": "true",
             "GATEWAY_ALLOWED_USERS": "alice,bob",
+            "MODAL_TOKEN_ID": "modal-id",
+            "MODAL_TOKEN_SECRET": "modal-secret",
+            "DAYTONA_API_KEY": "daytona-key",
         }
         result_env = _run_with_env(extra_os_env=leaked_vars)
 
@@ -281,5 +283,8 @@ class TestBlocklistCoverage:
             "GITHUB_APP_ID",
             "GITHUB_APP_PRIVATE_KEY_PATH",
             "GITHUB_APP_INSTALLATION_ID",
+            "MODAL_TOKEN_ID",
+            "MODAL_TOKEN_SECRET",
+            "DAYTONA_API_KEY",
         }
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)

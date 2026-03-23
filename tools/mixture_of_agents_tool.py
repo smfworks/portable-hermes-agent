@@ -281,7 +281,6 @@ async def mixture_of_agents_tool(
     try:
         logger.info("Starting Mixture-of-Agents processing...")
 
-        # Validate inputs before making any API calls
         if not user_prompt or not user_prompt.strip():
             raise ValueError("user_prompt is required and cannot be empty")
 
@@ -549,4 +548,5 @@ registry.register(
     check_fn=check_moa_requirements,
     requires_env=["OPENROUTER_API_KEY"],
     is_async=True,
+    emoji="🧠",
 )

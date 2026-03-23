@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -77,7 +77,7 @@ class SkillMeta:
 class SkillBundle:
     """A downloaded skill ready for quarantine/scanning/installation."""
     name: str
-    files: Dict[str, str]   # relative_path -> text content
+    files: Dict[str, Union[str, bytes]]   # relative_path -> file content
     source: str
     identifier: str
     trust_level: str
@@ -375,7 +375,7 @@ class GitHubSource(SkillSource):
 
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
         try:
-            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15)
+            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15, follow_redirects=True)
             if resp.status_code != 200:
                 return []
         except httpx.HTTPError:
@@ -407,7 +407,7 @@ class GitHubSource(SkillSource):
         """Recursively download all text files from a GitHub directory."""
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
         try:
-            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15)
+            resp = httpx.get(url, headers=self.auth.get_headers(), timeout=15, follow_redirects=True)
             if resp.status_code != 200:
                 return {}
         except httpx.HTTPError:
@@ -441,7 +441,7 @@ class GitHubSource(SkillSource):
             resp = httpx.get(
                 url,
                 headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
-                timeout=15,
+                timeout=15, follow_redirects=True,
             )
             if resp.status_code == 200:
                 return resp.text
@@ -961,8 +961,8 @@ class SkillsShSource(SkillSource):
 
         default_repo = f"{parts[0]}/{parts[1]}"
         repo = detail.get("repo", default_repo) if isinstance(detail, dict) else default_repo
-        skill_token = parts[2]
-        tokens = [skill_token]
+        skill_token=parts[2].split("/")[-1]
+        tokens=[skill_token]
         if isinstance(detail, dict):
             tokens.extend([
                 detail.get("install_skill", ""),
@@ -970,7 +970,10 @@ class SkillsShSource(SkillSource):
                 detail.get("body_title", ""),
             ])
 
-        for base_path in ("skills/", ".agents/skills/", ".claude/skills/"):
+        # Standard skill paths
+        base_paths = ["skills/", ".agents/skills/", ".claude/skills/"]
+
+        for base_path in base_paths:
             try:
                 skills = self.github._list_skills_in_repo(repo, base_path)
             except Exception:
@@ -978,6 +981,39 @@ class SkillsShSource(SkillSource):
             for meta in skills:
                 if self._matches_skill_tokens(meta, tokens):
                     return meta.identifier
+
+        # Fallback: scan repo root for directories that might contain skills
+        try:
+            root_url = f"https://api.github.com/repos/{repo}/contents/"
+            resp = httpx.get(root_url, headers=self.github.auth.get_headers(),
+                             timeout=15, follow_redirects=True)
+            if resp.status_code == 200:
+                entries = resp.json()
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if entry.get("type") != "dir":
+                            continue
+                        dir_name = entry["name"]
+                        if dir_name.startswith(".") or dir_name.startswith("_"):
+                            continue
+                        if dir_name in ("skills", ".agents", ".claude"):
+                            continue  # already tried
+                        # Try direct: repo/dir/skill_token
+                        direct_id = f"{repo}/{dir_name}/{skill_token}"
+                        meta = self.github.inspect(direct_id)
+                        if meta:
+                            return meta.identifier
+                        # Try listing skills in this directory
+                        try:
+                            skills = self.github._list_skills_in_repo(repo, dir_name + "/")
+                        except Exception:
+                            continue
+                        for meta in skills:
+                            if self._matches_skill_tokens(meta, tokens):
+                                return meta.identifier
+        except Exception:
+            pass
+
         return None
 
     def _finalize_inspect_meta(self, meta: SkillMeta, canonical: str, detail: Optional[dict]) -> SkillMeta:
@@ -1940,13 +1976,18 @@ class OptionalSkillSource(SkillSource):
         else:
             skill_dir = resolved
 
-        files: Dict[str, str] = {}
+        files: Dict[str, Union[str, bytes]] = {}
         for f in skill_dir.rglob("*"):
-            if f.is_file() and not f.name.startswith("."):
+            if (
+                f.is_file()
+                and not f.name.startswith(".")
+                and "__pycache__" not in f.parts
+                and f.suffix != ".pyc"
+            ):
                 rel_path = str(f.relative_to(skill_dir))
                 try:
-                    files[rel_path] = f.read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
+                    files[rel_path] = f.read_bytes()
+                except OSError:
                     continue
 
         if not files:
@@ -2063,6 +2104,15 @@ def _read_index_cache(key: str) -> Optional[Any]:
 def _write_index_cache(key: str, data: Any) -> None:
     """Write data to cache."""
     INDEX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Ensure .ignore exists so ripgrep (and tools respecting .ignore) skip
+    # this directory.  Cache files contain unvetted community content that
+    # could include adversarial text (prompt injection via catalog entries).
+    ignore_file = HUB_DIR / ".ignore"
+    if not ignore_file.exists():
+        try:
+            ignore_file.write_text("# Exclude hub internals from search tools\n*\n")
+        except OSError:
+            pass
     cache_file = INDEX_CACHE_DIR / f"{key}.json"
     try:
         cache_file.write_text(json.dumps(data, ensure_ascii=False, default=str))
@@ -2248,7 +2298,10 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
     for rel_path, file_content in bundle.files.items():
         file_dest = dest / rel_path
         file_dest.parent.mkdir(parents=True, exist_ok=True)
-        file_dest.write_text(file_content, encoding="utf-8")
+        if isinstance(file_content, bytes):
+            file_dest.write_bytes(file_content)
+        else:
+            file_dest.write_text(file_content, encoding="utf-8")
 
     return dest
 

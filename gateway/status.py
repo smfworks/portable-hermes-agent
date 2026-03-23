@@ -83,11 +83,30 @@ def _looks_like_gateway_process(pid: int) -> bool:
     """Return True when the live PID still looks like the Hermes gateway."""
     cmdline = _read_process_cmdline(pid)
     if not cmdline:
-        # If we cannot inspect the process, fall back to the liveness check.
-        return True
+        return False
 
     patterns = (
         "hermes_cli.main gateway",
+        "hermes_cli/main.py gateway",
+        "hermes gateway",
+        "gateway/run.py",
+    )
+    return any(pattern in cmdline for pattern in patterns)
+
+
+def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
+    """Validate gateway identity from PID-file metadata when cmdline is unavailable."""
+    if record.get("kind") != _GATEWAY_KIND:
+        return False
+
+    argv = record.get("argv")
+    if not isinstance(argv, list) or not argv:
+        return False
+
+    cmdline = " ".join(str(part) for part in argv)
+    patterns = (
+        "hermes_cli.main gateway",
+        "hermes_cli/main.py gateway",
         "hermes gateway",
         "gateway/run.py",
     )
@@ -178,8 +197,8 @@ def write_runtime_status(
     payload = _read_json_file(path) or _build_runtime_status_record()
     payload.setdefault("platforms", {})
     payload.setdefault("kind", _GATEWAY_KIND)
-    payload.setdefault("pid", os.getpid())
-    payload.setdefault("start_time", _get_process_start_time(os.getpid()))
+    payload["pid"] = os.getpid()
+    payload["start_time"] = _get_process_start_time(os.getpid())
     payload["updated_at"] = _utc_now_iso()
 
     if gateway_state is not None:
@@ -255,6 +274,21 @@ def acquire_scoped_lock(scope: str, identity: str, metadata: Optional[dict[str, 
                     and current_start != existing.get("start_time")
                 ):
                     stale = True
+                # Check if process is stopped (Ctrl+Z / SIGTSTP) — stopped
+                # processes still respond to os.kill(pid, 0) but are not
+                # actually running. Treat them as stale so --replace works.
+                if not stale:
+                    try:
+                        _proc_status = Path(f"/proc/{existing_pid}/status")
+                        if _proc_status.exists():
+                            for _line in _proc_status.read_text().splitlines():
+                                if _line.startswith("State:"):
+                                    _state = _line.split()[1]
+                                    if _state in ("T", "t"):  # stopped or tracing stop
+                                        stale = True
+                                    break
+                    except (OSError, PermissionError):
+                        pass
         if stale:
             try:
                 lock_path.unlink(missing_ok=True)
@@ -295,6 +329,25 @@ def release_scoped_lock(scope: str, identity: str) -> None:
         pass
 
 
+def release_all_scoped_locks() -> int:
+    """Remove all scoped lock files in the lock directory.
+
+    Called during --replace to clean up stale locks left by stopped/killed
+    gateway processes that did not release their locks gracefully.
+    Returns the number of lock files removed.
+    """
+    lock_dir = _get_lock_dir()
+    removed = 0
+    if lock_dir.exists():
+        for lock_file in lock_dir.glob("*.lock"):
+            try:
+                lock_file.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def get_running_pid() -> Optional[int]:
     """Return the PID of a running gateway instance, or ``None``.
 
@@ -325,8 +378,9 @@ def get_running_pid() -> Optional[int]:
         return None
 
     if not _looks_like_gateway_process(pid):
-        remove_pid_file()
-        return None
+        if not _record_looks_like_gateway(record):
+            remove_pid_file()
+            return None
 
     return pid
 

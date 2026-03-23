@@ -1131,6 +1131,19 @@ class StatusBar(tk.Frame):
 
 class HermesGUI:
     def __init__(self):
+        # Enable DPI awareness BEFORE creating the Tk root window.
+        # Without this, Toplevel dialogs (delete confirmation, etc.)
+        # render at physical pixels instead of scaled DPI, making
+        # text appear as tiny specks on high-DPI displays.
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Per-monitor DPI aware
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()  # Fallback for older Windows
+            except Exception:
+                pass
+
         self.root = tk.Tk()
         self.root.title("Hermes Agent")
         self.root.geometry("1100x700")

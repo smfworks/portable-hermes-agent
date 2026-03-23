@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from gui.theme import C, FONTS, apply_theme, set_dark_title_bar, Tooltip, center_window
+from gui.theme import C, FONTS, apply_theme, set_dark_title_bar, Tooltip, center_window, init_dpi_scaling, S, SF
 from gui.agent_bridge import AgentBridge
 from gui.api_setup_wizard import APISetupWizard, get_missing_keys
 from gui.extensions import ExtensionsManager
@@ -77,7 +77,7 @@ class MessageBubble(tk.Frame):
                 fg=label_fg, bg=bg).pack(side="left")
 
         ts = datetime.now().strftime("%H:%M")
-        tk.Label(hdr, text=ts, font=("Segoe UI", 8),
+        tk.Label(hdr, text=ts, font=SF("Segoe UI", 8),
                 fg=C["text_disabled"], bg=bg).pack(side="right")
 
         # Check for markdown images: ![alt](url)
@@ -216,7 +216,7 @@ class ToolCallWidget(tk.Frame):
         row = tk.Frame(card, bg=C["msg_tool"])
         row.pack(fill="x")
 
-        tk.Label(row, text="\u25B6", font=("Segoe UI", 8),
+        tk.Label(row, text="\u25B6", font=SF("Segoe UI", 8),
                 fg=C["warning_dark"], bg=C["msg_tool"]).pack(side="left", padx=(0, 6))
         tk.Label(row, text=tool_name, font=FONTS["mono_small"] + ("bold",),
                 fg=C["accent"], bg=C["msg_tool"]).pack(side="left")
@@ -227,50 +227,88 @@ class ToolCallWidget(tk.Frame):
                 preview += "..."
             tk.Label(card, text=preview, font=FONTS["mono_small"],
                     fg=C["text_hint"], bg=C["msg_tool"],
-                    wraplength=500, justify="left", anchor="w").pack(fill="x")
+                    wraplength=S(500), justify="left", anchor="w").pack(fill="x")
 
 
-class ThinkingIndicator(tk.Frame):
-    """Animated thinking dots."""
+class StreamingBubble(tk.Frame):
+    """A chat bubble that streams text token-by-token."""
 
     def __init__(self, parent):
         super().__init__(parent, bg=C["bg_main"])
-        self._alive = False
-        self._dots = 0
+        self._full_text = ""
+        self._bg = C["msg_ai"]
 
         pad = tk.Frame(self, bg=C["bg_main"])
-        pad.pack(fill="x", padx=16, pady=4)
+        pad.pack(fill="x", padx=16, pady=3)
 
-        card = tk.Frame(pad, bg=C["bg_card"], highlightbackground=C["info"],
-                       highlightthickness=1, padx=12, pady=6)
-        card.pack(side="left")
+        self._card = tk.Frame(pad, bg=self._bg,
+                             highlightbackground=C["msg_ai_border"],
+                             highlightthickness=1, padx=10, pady=4)
+        self._card.pack(side="left", anchor="w", fill="x", expand=True)
 
-        self._label = tk.Label(card, text="Hermes is thinking",
-                              font=FONTS["small"] + ("italic",),
-                              fg=C["info"], bg=C["bg_card"])
-        self._label.pack(side="left")
+        # Header — tight single row
+        hdr = tk.Frame(self._card, bg=self._bg)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Hermes", font=FONTS["small"] + ("bold",),
+                fg=C["success"], bg=self._bg, pady=0).pack(side="left")
+        ts = datetime.now().strftime("%H:%M")
+        tk.Label(hdr, text=ts, font=SF("Segoe UI", 8),
+                fg=C["text_disabled"], bg=self._bg, pady=0).pack(side="right")
 
-        self._dots_label = tk.Label(card, text="", width=4,
-                                   font=FONTS["body"],
-                                   fg=C["info"], bg=C["bg_card"])
-        self._dots_label.pack(side="left")
+        # Body text widget — stays editable (normal) during streaming
+        self._body = tk.Text(self._card, wrap="word", bg=self._bg,
+                            fg=C["text_primary"], font=FONTS["body"],
+                            relief="flat", borderwidth=0,
+                            padx=0, pady=0, cursor="arrow",
+                            selectbackground=C["accent"],
+                            selectforeground="white",
+                            highlightthickness=0, height=1,
+                            spacing1=0, spacing2=0, spacing3=0)
+        self._body.pack(fill="x")
 
-    def start(self):
-        self._alive = True
-        self._tick()
+        # Blinking cursor — separate label so it can't corrupt text
+        self._cursor_lbl = tk.Label(self._card, text="\u258c",
+                                    font=FONTS["body"], fg=C["info"],
+                                    bg=self._bg, pady=0)
+        self._cursor_lbl.pack(anchor="w")
+        self._cursor_on = True
+        self._blink()
 
-    def stop(self):
-        self._alive = False
+    def append_text(self, text: str):
+        """Append a text delta to the streaming bubble."""
+        if text is None:
+            return
+        self._full_text += text
+        self._body.insert("end", text)
+        # Auto-resize height based on content
+        content = self._body.get("1.0", "end-1c")
+        lines = max(1, content.count('\n') + 1)
+        for line in content.split('\n'):
+            lines += max(0, len(line) // 70)
+        self._body.configure(height=min(lines, 30))
 
-    def _tick(self):
-        if not self._alive:
+    def get_text(self) -> str:
+        return self._full_text
+
+    def finalize(self):
+        """Stop cursor blink, lock the text, remove cursor."""
+        self._cursor_on = False
+        try:
+            self._cursor_lbl.destroy()
+        except tk.TclError:
+            pass
+        self._body.configure(state="disabled")
+
+    def _blink(self):
+        if not self._cursor_on:
             return
         try:
-            self._dots = (self._dots + 1) % 4
-            self._dots_label.configure(text="." * self._dots)
-            self.after(400, self._tick)
+            cur = self._cursor_lbl.cget("fg")
+            self._cursor_lbl.configure(
+                fg=self._bg if cur != self._bg else C["info"])
+            self.after(500, self._blink)
         except tk.TclError:
-            pass  # Widget was destroyed
+            pass
 
 
 # ============================================================================
@@ -294,7 +332,7 @@ class Sidebar(tk.Frame):
     def __init__(self, parent, on_new=None, on_model_change=None,
                  on_session_select=None, on_local_models=None,
                  on_auto_load=None, **kw):
-        super().__init__(parent, bg=C["bg_sidebar"], width=260, **kw)
+        super().__init__(parent, bg=C["bg_sidebar"], width=S(260), **kw)
         self.pack_propagate(False)
         self.on_new = on_new
         self.on_model_change = on_model_change
@@ -310,12 +348,12 @@ class Sidebar(tk.Frame):
         self._model_states: Dict[str, str] = {}  # model_id -> "loaded"/"not-loaded"
 
         # -- Logo --
-        logo_fr = tk.Frame(self, bg=C["bg_sidebar"], pady=16, padx=16)
+        logo_fr = tk.Frame(self, bg=C["bg_sidebar"], pady=12, padx=16)
         logo_fr.pack(fill="x")
         tk.Label(logo_fr, text="HERMES", font=FONTS["logo"],
-                fg=C["accent"], bg=C["bg_sidebar"]).pack(side="left")
+                fg=C["accent"], bg=C["bg_sidebar"]).pack(anchor="w")
         tk.Label(logo_fr, text="AGENT", font=FONTS["logo_sub"],
-                fg=C["text_secondary"], bg=C["bg_sidebar"]).pack(side="left", padx=(6, 0))
+                fg=C["text_secondary"], bg=C["bg_sidebar"]).pack(anchor="w")
 
         # -- New Chat button --
         btn_fr = tk.Frame(self, bg=C["bg_sidebar"], padx=16)
@@ -331,7 +369,7 @@ class Sidebar(tk.Frame):
         tk.Label(model_fr, text="Model:", font=FONTS["small"],
                 fg=C["text_hint"], bg=C["bg_sidebar"]).pack(anchor="w")
 
-        self.model_var = tk.StringVar(value=os.getenv("LLM_MODEL", "google/gemini-2.5-flash"))
+        self.model_var = tk.StringVar(value="google/gemini-2.5-flash")
         display_values = [self._display_name(m) for m in self._all_models]
         self.model_combo = ttk.Combobox(model_fr, textvariable=tk.StringVar(),
                                         values=display_values,
@@ -426,7 +464,7 @@ class Sidebar(tk.Frame):
         gpu_row.pack(fill="x", pady=2)
         tk.Label(gpu_row, text="GPU:", font=FONTS["small"],
                 fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
-        self._gpu_var = tk.StringVar(value=os.getenv("LM_STUDIO_GPU", ""))
+        self._gpu_var = tk.StringVar(value="")
         self._gpu_combo = ttk.Combobox(gpu_row, textvariable=self._gpu_var,
                                         font=FONTS["small"], state="readonly", width=22)
         self._gpu_combo.pack(side="left", fill="x", expand=True)
@@ -450,7 +488,7 @@ class Sidebar(tk.Frame):
         ctx_row.pack(fill="x", pady=2)
         tk.Label(ctx_row, text="Ctx:", font=FONTS["small"],
                 fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
-        self._ctx_var = tk.IntVar(value=int(os.getenv("LM_STUDIO_CTX", "32768")))
+        self._ctx_var = tk.IntVar(value=4096)
         ctx_spin = ttk.Spinbox(ctx_row, from_=512, to=131072, increment=512,
                                textvariable=self._ctx_var, font=FONTS["small"], width=8)
         ctx_spin.pack(side="left")
@@ -464,7 +502,7 @@ class Sidebar(tk.Frame):
         temp_row.pack(fill="x", pady=2)
         tk.Label(temp_row, text="Temp:", font=FONTS["small"],
                 fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
-        self._temp_var = tk.DoubleVar(value=float(os.getenv("LM_STUDIO_TEMP", "0.7")))
+        self._temp_var = tk.DoubleVar(value=0.7)
         temp_spin = ttk.Spinbox(temp_row, from_=0.0, to=2.0, increment=0.1,
                                 textvariable=self._temp_var, font=FONTS["small"], width=8,
                                 format="%.1f")
@@ -477,7 +515,7 @@ class Sidebar(tk.Frame):
         topp_row.pack(fill="x", pady=2)
         tk.Label(topp_row, text="Top-P:", font=FONTS["small"],
                 fg=C["text_hint"], bg=C["bg_sidebar"], width=6, anchor="w").pack(side="left")
-        self._topp_var = tk.DoubleVar(value=float(os.getenv("LM_STUDIO_TOP_P", "0.9")))
+        self._topp_var = tk.DoubleVar(value=0.9)
         topp_spin = ttk.Spinbox(topp_row, from_=0.0, to=1.0, increment=0.05,
                                 textvariable=self._topp_var, font=FONTS["small"], width=8,
                                 format="%.2f")
@@ -489,7 +527,7 @@ class Sidebar(tk.Frame):
         cb_fr = tk.Frame(parent, bg=C["bg_sidebar"])
         cb_fr.pack(fill="x", pady=(4, 4))
 
-        self._auto_load_var = tk.BooleanVar(value=os.getenv("LM_STUDIO_AUTO_LOAD", "1") == "1")
+        self._auto_load_var = tk.BooleanVar(value=True)
         auto_cb = tk.Checkbutton(cb_fr, text="Auto-load",
                                  variable=self._auto_load_var,
                                  font=FONTS["small"], fg=C["text_hint"],
@@ -499,7 +537,7 @@ class Sidebar(tk.Frame):
                                  command=self._save_local_settings)
         auto_cb.pack(side="left")
 
-        self._flash_attn_var = tk.BooleanVar(value=os.getenv("LM_STUDIO_FLASH_ATTN", "1") == "1")
+        self._flash_attn_var = tk.BooleanVar(value=True)
         flash_cb = tk.Checkbutton(cb_fr, text="Flash Attn",
                                   variable=self._flash_attn_var,
                                   font=FONTS["small"], fg=C["text_hint"],
@@ -525,34 +563,8 @@ class Sidebar(tk.Frame):
         self._save_local_settings()
 
     def _save_local_settings(self):
-        """Persist local model settings to environment and .env file."""
-        settings = {
-            "LM_STUDIO_GPU": self._gpu_var.get(),
-            "LM_STUDIO_CTX": str(self._ctx_var.get()),
-            "LM_STUDIO_TEMP": f"{self._temp_var.get():.1f}",
-            "LM_STUDIO_TOP_P": f"{self._topp_var.get():.2f}",
-            "LM_STUDIO_AUTO_LOAD": "1" if self._auto_load_var.get() else "0",
-            "LM_STUDIO_FLASH_ATTN": "1" if self._flash_attn_var.get() else "0",
-        }
-        for k, v in settings.items():
-            os.environ[k] = v
-
-        # Persist to .env
-        PROJECT_ROOT = Path(__file__).parent.parent
-        env_path = PROJECT_ROOT / ".env"
-        if env_path.exists():
-            try:
-                content = env_path.read_text(encoding="utf-8")
-                for k, v in settings.items():
-                    pattern = rf"^{k}=.*$"
-                    replacement = f"{k}={v}"
-                    if re.search(pattern, content, re.MULTILINE):
-                        content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-                    else:
-                        content = content.rstrip("\n") + f"\n{replacement}\n"
-                env_path.write_text(content, encoding="utf-8")
-            except Exception:
-                pass
+        """Settings are held in UI widgets — nothing to persist."""
+        pass
 
     def _get_gpu_index(self) -> Optional[int]:
         """Parse GPU index from the GPU combobox selection."""
@@ -764,9 +776,12 @@ class Sidebar(tk.Frame):
         model = sess.get("model", "")
         msg_count = sess.get("message_count", 0)
 
+        if not hasattr(self, '_session_widgets'):
+            self._session_widgets = {}
         entry = tk.Frame(self.session_frame, bg=C["bg_sidebar"], padx=12, pady=4,
                         cursor="hand2")
         entry.pack(fill="x", pady=1)
+        self._session_widgets[sid] = entry
 
         # Top row: title + delete button
         top_row = tk.Frame(entry, bg=C["bg_sidebar"])
@@ -774,10 +789,10 @@ class Sidebar(tk.Frame):
 
         tk.Label(top_row, text=title, font=FONTS["small"],
                 fg=C["text_primary"], bg=C["bg_sidebar"],
-                anchor="w", wraplength=190).pack(side="left", fill="x", expand=True)
+                anchor="w", wraplength=S(190)).pack(side="left", fill="x", expand=True)
 
         # Delete button (only visible on hover)
-        del_btn = tk.Label(top_row, text="\u2715", font=("Segoe UI", 9),
+        del_btn = tk.Label(top_row, text="\u2715", font=SF("Segoe UI", 9),
                           fg=C["bg_sidebar"], bg=C["bg_sidebar"],
                           cursor="hand2", padx=4)
         del_btn.pack(side="right")
@@ -788,7 +803,7 @@ class Sidebar(tk.Frame):
             short_model = model.split("/")[-1][:15]
             info_text += f" | {short_model}"
 
-        tk.Label(entry, text=info_text, font=("Segoe UI", 8),
+        tk.Label(entry, text=info_text, font=SF("Segoe UI", 8),
                 fg=C["text_disabled"], bg=C["bg_sidebar"],
                 anchor="w").pack(fill="x")
 
@@ -833,13 +848,11 @@ class Sidebar(tk.Frame):
             # Custom dialog with "don't show again" checkbox
             dlg = tk.Toplevel(self)
             dlg.title("Delete Session")
-            dlg.geometry("380x180")
             dlg.configure(bg=C["bg_main"])
             dlg.transient(self.winfo_toplevel())
             dlg.grab_set()
-            set_dark_title_bar(dlg)
-            center_window(dlg, 380, 180, self.winfo_toplevel())
 
+            # Content — pack first so we can measure before geometry
             tk.Label(dlg, text="Delete this session?",
                     font=FONTS["subheading"], fg=C["text_primary"],
                     bg=C["bg_main"]).pack(pady=(20, 4))
@@ -855,10 +868,10 @@ class Sidebar(tk.Frame):
                           fg=C["text_secondary"], bg=C["bg_main"],
                           selectcolor=C["bg_input"],
                           activebackground=C["bg_main"],
-                          activeforeground=C["text_primary"]).pack()
+                          activeforeground=C["text_primary"]).pack(pady=(0, 8))
 
             btn_frame = tk.Frame(dlg, bg=C["bg_main"])
-            btn_frame.pack(pady=12)
+            btn_frame.pack(pady=(4, 16))
 
             def _do_delete():
                 if dont_ask.get():
@@ -866,32 +879,41 @@ class Sidebar(tk.Frame):
                 dlg.destroy()
                 self._perform_delete(session_id)
 
-            ttk.Button(btn_frame, text="Delete", style="Danger.TButton",
-                       command=_do_delete).pack(side="left", padx=4)
-            ttk.Button(btn_frame, text="Cancel", style="TButton",
-                       command=dlg.destroy).pack(side="left", padx=4)
+            ttk.Button(btn_frame, text="  Delete  ", style="Danger.TButton",
+                       command=_do_delete).pack(side="left", padx=8)
+            ttk.Button(btn_frame, text="  Cancel  ", style="TButton",
+                       command=dlg.destroy).pack(side="left", padx=8)
+
+            set_dark_title_bar(dlg)
+            center_window(dlg, 420, 220, self.winfo_toplevel())
         else:
             self._perform_delete(session_id)
 
     def _perform_delete(self, session_id):
-        """Actually delete the session from the database."""
-        try:
-            from hermes_state import SessionDB
-            db = SessionDB()
-            db.delete_session(session_id)
-        except Exception:
+        """Remove widget instantly, delete from DB in background."""
+        # Immediate visual removal
+        widget = getattr(self, '_session_widgets', {}).pop(session_id, None)
+        if widget:
+            widget.destroy()
+
+        # DB delete in background
+        def _do():
             try:
-                # Fallback: try direct SQL if method doesn't exist
-                import sqlite3
-                from hermes_state import DEFAULT_DB_PATH
-                conn = sqlite3.connect(str(DEFAULT_DB_PATH))
-                conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-                conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-                conn.commit()
-                conn.close()
+                from hermes_state import SessionDB
+                db = SessionDB()
+                db.delete_session(session_id)
             except Exception:
-                pass
-        self._load_sessions()
+                try:
+                    import sqlite3
+                    from hermes_state import DEFAULT_DB_PATH
+                    conn = sqlite3.connect(str(DEFAULT_DB_PATH))
+                    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                    conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+        threading.Thread(target=_do, daemon=True).start()
 
     def refresh_sessions(self):
         self._load_sessions()
@@ -906,7 +928,6 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.bridge = bridge
         self.title("Settings")
-        self.geometry("550x480")
         self.configure(bg=C["bg_main"])
         self.transient(parent)
         self.grab_set()
@@ -971,12 +992,12 @@ class SettingsDialog(tk.Toplevel):
             "deepseek/deepseek-chat-v3",
             "qwen/qwen3-235b-a22b",
         ]
-        self.model_var = tk.StringVar(value=os.getenv("LLM_MODEL", "google/gemini-2.5-flash"))
+        self.model_var = tk.StringVar(value="google/gemini-2.5-flash")
         self.model_combo = ttk.Combobox(parent, textvariable=self.model_var,
                                         values=models, font=FONTS["mono_small"])
         self.model_combo.pack(fill="x", pady=(4, 12))
         tk.Label(parent, text="You can type any OpenRouter model ID",
-                font=("Segoe UI", 8), fg=C["text_disabled"], bg=C["bg_main"]).pack(anchor="w")
+                font=SF("Segoe UI", 8), fg=C["text_disabled"], bg=C["bg_main"]).pack(anchor="w")
 
     def _save(self):
         env_path = PROJECT_ROOT / ".env"
@@ -998,8 +1019,6 @@ class SettingsDialog(tk.Toplevel):
                     content += f"\n{key}={val}\n"
         model = self.model_var.get().strip()
         if model:
-            os.environ["LLM_MODEL"] = model
-            content = re.sub(r"^LLM_MODEL=.*$", f"LLM_MODEL={model}", content, flags=re.MULTILINE)
             self.bridge.set_model(model)
         with open(env_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -1014,7 +1033,6 @@ class SkillsBrowser(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Skills Browser")
-        self.geometry("650x500")
         self.configure(bg=C["bg_main"])
         self.transient(parent)
         set_dark_title_bar(self)
@@ -1078,10 +1096,10 @@ class SkillsBrowser(tk.Toplevel):
 
 class StatusBar(tk.Frame):
     def __init__(self, parent):
-        super().__init__(parent, bg=C["bg_sidebar"], height=28)
+        super().__init__(parent, bg=C["bg_sidebar"], height=S(28))
         self.pack_propagate(False)
 
-        self.dot = tk.Label(self, text="\u25CF", font=("Segoe UI", 10),
+        self.dot = tk.Label(self, text="\u25CF", font=SF("Segoe UI", 10),
                            fg=C["success"], bg=C["bg_sidebar"])
         self.dot.pack(side="left", padx=(12, 4))
 
@@ -1131,29 +1149,22 @@ class StatusBar(tk.Frame):
 
 class HermesGUI:
     def __init__(self):
-        # Enable DPI awareness BEFORE creating the Tk root window.
-        # Without this, Toplevel dialogs (delete confirmation, etc.)
-        # render at physical pixels instead of scaled DPI, making
-        # text appear as tiny specks on high-DPI displays.
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Per-monitor DPI aware
-        except Exception:
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()  # Fallback for older Windows
-            except Exception:
-                pass
-
         self.root = tk.Tk()
-        self.root.title("Hermes Agent")
-        self.root.geometry("1100x700")
-        self.root.minsize(900, 550)
+        self.root.withdraw()  # Hide until fully themed to avoid white flash
 
-        # Apply full theme
+        # DPI awareness + scaling — must happen before any geometry calls
+        init_dpi_scaling(self.root)
+
+        self.root.title("Hermes Agent")
+        self.root.geometry(f"{S(1100)}x{S(700)}")
+        self.root.minsize(S(900), S(550))
+
+        # Apply full theme (also sets dark title bar)
         apply_theme(self.root)
 
-        # Center main window on screen
+        # Center and show
         center_window(self.root, 1100, 700)
+        self.root.deiconify()
 
         # Agent bridge
         self.bridge = AgentBridge(
@@ -1167,8 +1178,10 @@ class HermesGUI:
             on_complete=self._on_complete,
             on_approval=self._on_approval,
             on_reasoning=self._on_reasoning,
+            on_stream_delta=self._on_stream_delta,
         )
-        self.thinking_widget = None
+        self._stream_bubble = None  # Active streaming bubble
+        self._has_streamed = False   # True once any stream delta arrived
 
         # Validate startup model (local model + LM Studio check)
         self.bridge._validate_startup_model()
@@ -1231,7 +1244,7 @@ class HermesGUI:
 
     def _build_menu(self):
         # Custom dark menu bar (frame-based to avoid Windows white menu strip)
-        self.menu_bar = tk.Frame(self.root, bg=C["bg_sidebar"], height=28)
+        self.menu_bar = tk.Frame(self.root, bg=C["bg_sidebar"], height=S(28))
         self.menu_bar.pack(fill="x", side="top")
         self.menu_bar.pack_propagate(False)
 
@@ -1296,7 +1309,7 @@ class HermesGUI:
         chat_area.pack(side="left", fill="both", expand=True)
 
         # Chat header
-        hdr = tk.Frame(chat_area, bg=C["bg_sidebar"], height=40)
+        hdr = tk.Frame(chat_area, bg=C["bg_sidebar"], height=S(40))
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
 
@@ -1455,10 +1468,10 @@ class HermesGUI:
             fname = os.path.basename(path)
             if len(fname) > 18:
                 fname = fname[:15] + "..."
-            tk.Label(chip, text=fname, font=("Segoe UI", 8),
+            tk.Label(chip, text=fname, font=SF("Segoe UI", 8),
                     fg=C["text_secondary"], bg=C["bg_card"]).pack(side="left")
 
-            rm_btn = tk.Label(chip, text=" \u2715", font=("Segoe UI", 9, "bold"),
+            rm_btn = tk.Label(chip, text=" \u2715", font=SF("Segoe UI", 9, "bold"),
                             fg=C["danger"], bg=C["bg_card"], cursor="hand2")
             rm_btn.pack(side="left")
             rm_btn.bind("<Button-1>", lambda e, p=path: self._remove_image(p))
@@ -1476,10 +1489,10 @@ class HermesGUI:
             display = msg + "\n\U0001f4ce " + ", ".join(fnames)
         self._add_msg(display, "user")
 
-        # Thinking
-        self.thinking_widget = ThinkingIndicator(self.msg_frame)
-        self.thinking_widget.pack(fill="x")
-        self.thinking_widget.start()
+        # Streaming bubble — shows tokens as they arrive
+        self._stream_bubble = StreamingBubble(self.msg_frame)
+        self._stream_bubble.pack(fill="x")
+        self._has_streamed = False
 
         self.status_bar.set_thinking()
 
@@ -1497,26 +1510,68 @@ class HermesGUI:
         self._scroll_bottom()
 
     def _scroll_bottom(self):
-        self.root.after(50, lambda: self.msg_canvas.yview_moveto(1.0))
+        def _do_scroll():
+            self.msg_canvas.update_idletasks()
+            self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all"))
+            self.msg_canvas.yview_moveto(1.0)
+        self.root.after(10, _do_scroll)
 
     # ---- Callbacks ----
 
     def _on_response(self, text):
-        if self.thinking_widget:
-            self.thinking_widget.stop()
-            try:
-                self.thinking_widget.destroy()
-            except tk.TclError:
-                pass
-            self.thinking_widget = None
-        if text:
+        if self._stream_bubble:
+            # Streaming bubble still alive — finalize it
+            if self._stream_bubble.get_text().strip():
+                self._stream_bubble.finalize()
+            else:
+                try:
+                    self._stream_bubble.destroy()
+                except tk.TclError:
+                    pass
+                # No streamed content — show full response as regular bubble
+                if text and not self._has_streamed:
+                    self._add_msg(text, "ai")
+            self._stream_bubble = None
+        elif text and not self._has_streamed:
+            # Only show full response if we never streamed (non-streaming model/fallback)
             self._add_msg(text, "ai")
 
     def _on_tool_call(self, name, preview):
+        # Finalize any in-progress streaming bubble before showing the tool call
+        self._cleanup_stream_bubble()
         w = ToolCallWidget(self.msg_frame, name, preview)
         w.pack(fill="x")
         self.status_bar.set_tool(name)
+        # Start a new streaming bubble for the next response segment
+        self._stream_bubble = StreamingBubble(self.msg_frame)
+        self._stream_bubble.pack(fill="x")
         self._scroll_bottom()
+
+    def _on_stream_delta(self, text):
+        """Append a token to the streaming bubble."""
+        if text is None:
+            # End-of-turn signal — finalize the current bubble
+            if self._stream_bubble and self._stream_bubble.get_text().strip():
+                self._stream_bubble.finalize()
+                self._stream_bubble = None
+            return
+        if self._stream_bubble:
+            self._has_streamed = True
+            self._stream_bubble.append_text(text)
+            self._scroll_bottom()
+            self.status_bar.set_thinking("Streaming")
+
+    def _cleanup_stream_bubble(self):
+        """Remove or finalize the active streaming bubble."""
+        if self._stream_bubble:
+            if self._stream_bubble.get_text().strip():
+                self._stream_bubble.finalize()
+            else:
+                try:
+                    self._stream_bubble.destroy()
+                except tk.TclError:
+                    pass
+            self._stream_bubble = None
 
     def _on_thinking(self, text):
         if text:
@@ -1528,13 +1583,7 @@ class HermesGUI:
         self.status_bar.set_iter(n)
 
     def _on_error(self, msg):
-        if self.thinking_widget:
-            self.thinking_widget.stop()
-            try:
-                self.thinking_widget.destroy()
-            except tk.TclError:
-                pass
-            self.thinking_widget = None
+        self._cleanup_stream_bubble()
         self._add_msg(msg, "error")
         self.status_bar.set_error()
 
@@ -1552,15 +1601,14 @@ class HermesGUI:
         self.bridge.respond_to_approval(approved)
 
     def _on_reasoning(self, text):
-        """Show model's reasoning/thinking in a subtle way."""
+        """Show model's reasoning in the status bar (not as chat bubbles)."""
         if text and text.strip():
-            # Show as a dim system-style message
-            w = MessageBubble(self.msg_frame, f"[Thinking] {text[:300]}...",
-                             msg_type="system")
-            w.pack(fill="x")
-            self._scroll_bottom()
+            # Truncate for status bar display
+            preview = text.strip().replace('\n', ' ')[:80]
+            self.status_bar.set_thinking(f"Thinking: {preview}")
 
     def _on_complete(self, result):
+        self._cleanup_stream_bubble()
         self.status_bar.set_ready()
         # Update token display if available
         tokens = self.bridge.get_token_usage()
@@ -1600,15 +1648,24 @@ class HermesGUI:
 
     def _on_model_change(self, model_id):
         """Called when user picks a model from the sidebar dropdown."""
-        self.bridge.set_model(model_id)
+        # Detect if this is a local model (known from LM Studio discovery)
+        if model_id in self.bridge._known_local_models:
+            url = self.bridge._resolve_lm_studio_url()
+            if url:
+                self.bridge.set_local_mode(url, model_id)
+            else:
+                self.bridge.set_model(model_id)
+        else:
+            self.bridge.set_model(model_id)
         # Show friendly name in status bar
         display = model_id
         for mid, name, note in self.sidebar._all_models:
             if mid == model_id:
                 display = name
                 break
-        self.status_bar.set_model(display)
-        self._add_msg(f"Switched to {display}. Click '+ New Chat' to use it.", "system")
+        is_local = self.bridge._active_provider == "local"
+        self.status_bar.set_model(f"LM Studio: {display}" if is_local else display)
+        self._add_msg(f"Switched to {display}.", "system")
 
     def _on_session_select(self, session_id):
         """Load a past session into the chat view."""
@@ -1659,6 +1716,8 @@ class HermesGUI:
     def _interrupt(self):
         if self.bridge.is_running:
             self.bridge.interrupt()
+            self._cleanup_stream_bubble()
+            self._add_msg("Generation stopped.", "system")
             self.status_bar.set_ready()
 
     def _open_settings(self):
@@ -1686,25 +1745,11 @@ class HermesGUI:
 
     def _on_lm_studio_ready(self, base_url, model_id):
         """Switch Hermes to use LM Studio as the LLM provider."""
-        # Ensure /v1 suffix for OpenAI SDK compatibility
-        url = base_url.rstrip("/")
-        if not url.endswith("/v1"):
-            url += "/v1"
-
-        # Set the LM Studio URL BEFORE set_model so routing works correctly
-        self.bridge._lm_studio_base_url = url
         if model_id:
-            self.bridge.register_local_models(
-                list(self.bridge._known_local_models | {model_id})
-            )
-            os.environ["LLM_MODEL"] = model_id
-            self.bridge.set_model(model_id)
+            self.bridge.set_local_mode(base_url, model_id)
             short = model_id.split("/")[-1] if "/" in model_id else model_id
             self.status_bar.set_model(f"LM Studio: {short}")
             self.sidebar.set_model(model_id)
-
-        # Force agent recreation with new endpoint
-        self.bridge.agent = None
 
         self._add_msg(
             f"Switched to LM Studio (local model).\n"

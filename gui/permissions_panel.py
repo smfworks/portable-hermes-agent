@@ -5,7 +5,7 @@ Visual configuration for read/write/install/execute/network permissions.
 import tkinter as tk
 from tkinter import ttk
 
-from gui.theme import C, FONTS, set_dark_title_bar, Tooltip, center_window
+from gui.theme import C, FONTS, set_dark_title_bar, Tooltip, center_window, SF
 from gui.permissions import (
     PERMISSION_DEFS, load_permissions, save_permissions,
     get_level_name, get_level_description,
@@ -19,7 +19,6 @@ class PermissionsPanel(tk.Toplevel):
         super().__init__(parent)
         self.on_save = on_save
         self.title("Permissions")
-        self.geometry("600x650")
         self.configure(bg=C["bg_main"])
         self.transient(parent)
         self.grab_set()
@@ -127,7 +126,7 @@ class PermissionsPanel(tk.Toplevel):
         for lvl in range(max_level + 1):
             name = defn["levels"].get(lvl, ("?",))[0]
             anchor = "w" if lvl == 0 else ("e" if lvl == max_level else "center")
-            tk.Label(tick_frame, text=name, font=("Segoe UI", 7),
+            tk.Label(tick_frame, text=name, font=SF("Segoe UI", 7),
                     fg=C["text_disabled"], bg=C["bg_card"],
                     anchor=anchor).pack(side="left", expand=True, fill="x")
 

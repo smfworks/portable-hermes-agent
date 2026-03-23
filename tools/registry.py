@@ -84,29 +84,64 @@ class ToolRegistry:
     # Schema retrieval
     # ------------------------------------------------------------------
 
-    def get_definitions(self, tool_names: Set[str], quiet: bool = False) -> List[dict]:
+    def get_definitions(self, tool_names: Set[str], quiet: bool = False,
+                         skip_checks: bool = False) -> List[dict]:
         """Return OpenAI-format tool schemas for the requested tool names.
 
         Only tools whose ``check_fn()`` returns True (or have no check_fn)
-        are included.
+        are included — unless *skip_checks* is True, in which case all
+        requested tools are returned immediately (fail at call time instead
+        of blocking startup with network checks).
         """
-        result = []
+        if skip_checks:
+            result = []
+            for name in sorted(tool_names):
+                entry = self._tools.get(name)
+                if entry:
+                    result.append({"type": "function", "function": entry.schema})
+            return result
+
+        # Separate tools that need checking from those that don't
+        no_check = []
+        needs_check = []
         for name in sorted(tool_names):
             entry = self._tools.get(name)
             if not entry:
                 continue
             if entry.check_fn:
+                needs_check.append(entry)
+            else:
+                no_check.append(entry)
+
+        # Run all check_fn calls in parallel (they may do network I/O)
+        passed_checks = []
+        if needs_check:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _check(entry):
                 try:
-                    if not entry.check_fn():
-                        if not quiet:
-                            logger.debug("Tool %s unavailable (check failed)", name)
-                        continue
+                    return (entry, entry.check_fn())
                 except Exception:
-                    if not quiet:
-                        logger.debug("Tool %s check raised; skipping", name)
-                    continue
-            result.append({"type": "function", "function": entry.schema})
-        return result
+                    return (entry, False)
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                futures = {pool.submit(_check, e): e for e in needs_check}
+                for fut in as_completed(futures, timeout=15):
+                    try:
+                        entry, ok = fut.result(timeout=5)
+                        if ok:
+                            passed_checks.append(entry)
+                        elif not quiet:
+                            logger.debug("Tool %s unavailable (check failed)", entry.name)
+                    except Exception:
+                        entry = futures[fut]
+                        if not quiet:
+                            logger.debug("Tool %s check timed out; skipping", entry.name)
+
+        # Combine and sort
+        all_entries = no_check + passed_checks
+        all_entries.sort(key=lambda e: e.name)
+        return [{"type": "function", "function": e.schema} for e in all_entries]
 
     # ------------------------------------------------------------------
     # Dispatch

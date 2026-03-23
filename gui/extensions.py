@@ -13,7 +13,7 @@ from tkinter import ttk, messagebox
 from pathlib import Path
 from datetime import datetime
 
-from gui.theme import C, FONTS, set_dark_title_bar, Tooltip
+from gui.theme import C, FONTS, set_dark_title_bar, Tooltip, S, SF
 
 PROJECT_ROOT = Path(__file__).parent.parent
 EXTENSIONS_DIR = PROJECT_ROOT / "extensions"
@@ -208,7 +208,6 @@ class ExtensionsManager(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Extensions Manager")
-        self.geometry("700x550")
         self.configure(bg=C["bg_main"])
         self.transient(parent)
         set_dark_title_bar(self)
@@ -287,7 +286,7 @@ class ExtensionsManager(tk.Toplevel):
         else:
             dot_color, status_text = C["text_disabled"], "Not installed"
 
-        tk.Label(hdr, text="\u25CF", font=("Segoe UI", 12),
+        tk.Label(hdr, text="\u25CF", font=SF("Segoe UI", 12),
                 fg=dot_color, bg=C["bg_card"]).pack(side="left", padx=(0, 8))
 
         # Title and icon
@@ -302,7 +301,7 @@ class ExtensionsManager(tk.Toplevel):
         # Description
         tk.Label(card, text=ext["description"], font=FONTS["small"],
                 fg=C["text_secondary"], bg=C["bg_card"],
-                justify="left", anchor="w", wraplength=600).pack(fill="x", pady=(6, 0))
+                justify="left", anchor="w", wraplength=S(600)).pack(fill="x", pady=(6, 0))
 
         # Info row
         info = tk.Frame(card, bg=C["bg_card"])

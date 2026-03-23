@@ -11,7 +11,7 @@ from tkinter import ttk
 import webbrowser
 from pathlib import Path
 
-from gui.theme import C, FONTS, set_dark_title_bar, Tooltip
+from gui.theme import C, FONTS, set_dark_title_bar, Tooltip, SF
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -162,7 +162,6 @@ class APISetupWizard(tk.Toplevel):
         self.on_complete = on_complete
         self.auto_mode = auto_mode  # True = only show missing keys
         self.title("Hermes Agent - API Setup")
-        self.geometry("600x580")
         self.configure(bg=C["bg_main"])
         self.transient(parent)
         self.grab_set()
@@ -228,7 +227,7 @@ class APISetupWizard(tk.Toplevel):
                           padx=4, pady=3)
             row.pack(fill="x", pady=1)
 
-            tk.Label(row, text="\u25CF", font=("Segoe UI", 10),
+            tk.Label(row, text="\u25CF", font=SF("Segoe UI", 10),
                     fg=dot_color, bg=C["bg_main"]).pack(side="left", padx=(0, 8))
             tk.Label(row, text=f"[{svc['icon']}]", font=FONTS["mono_small"],
                     fg=C["text_disabled"], bg=C["bg_main"]).pack(side="left", padx=(0, 6))
@@ -236,7 +235,7 @@ class APISetupWizard(tk.Toplevel):
                     fg=C["text_primary"], bg=C["bg_main"]).pack(side="left")
             tk.Label(row, text=status_text, font=FONTS["small"],
                     fg=dot_color, bg=C["bg_main"]).pack(side="right")
-            tk.Label(row, text="  Set up", font=("Segoe UI", 8, "underline"),
+            tk.Label(row, text="  Set up", font=SF("Segoe UI", 8, "underline"),
                     fg=C["accent"], bg=C["bg_main"], cursor="hand2").pack(side="right")
 
             # Click row to set up just that service
@@ -367,7 +366,7 @@ class APISetupWizard(tk.Toplevel):
                    command=lambda: self._paste_from_clipboard(key_entry)).pack(side="left")
 
         tk.Label(clip_frame, text="  Copy the key on the website, then click this",
-                font=("Segoe UI", 8), fg=C["text_hint"],
+                font=SF("Segoe UI", 8), fg=C["text_hint"],
                 bg=C["bg_main"]).pack(side="left")
 
         # Status label
@@ -501,7 +500,7 @@ class APISetupWizard(tk.Toplevel):
             has_key = bool(os.getenv(svc["key"]))
             dot_color = C["success"] if has_key else C["text_disabled"]
 
-            tk.Label(row, text="\u25CF", font=("Segoe UI", 10),
+            tk.Label(row, text="\u25CF", font=SF("Segoe UI", 10),
                     fg=dot_color, bg=C["bg_main"]).pack(side="left", padx=(0, 8))
             tk.Label(row, text=svc["name"], font=FONTS["body"],
                     fg=C["text_primary"], bg=C["bg_main"]).pack(side="left")

@@ -74,7 +74,7 @@ class AgentBridge:
     def __init__(self, root, on_response=None, on_tool_call=None,
                  on_thinking=None, on_error=None, on_step=None,
                  on_clarify=None, on_complete=None, on_approval=None,
-                 on_reasoning=None):
+                 on_reasoning=None, on_stream_delta=None):
         self.root = root
         self.on_response = on_response
         self.on_tool_call = on_tool_call
@@ -85,6 +85,7 @@ class AgentBridge:
         self.on_complete = on_complete
         self.on_approval = on_approval
         self.on_reasoning = on_reasoning
+        self.on_stream_delta = on_stream_delta
 
         self.agent = None
         self.conversation_history: List[Dict[str, Any]] = []
@@ -96,6 +97,7 @@ class AgentBridge:
         self._interrupted = False
         self._lm_studio_base_url: Optional[str] = None
         self._known_local_models: set = set()  # Model IDs discovered from LM Studio
+        self._active_provider: str = "cloud"  # "cloud" or "local"
         self._startup_fallback = False  # True if we fell back from a local model
 
         # Load config (same as CLI)
@@ -143,82 +145,33 @@ class AgentBridge:
         except Exception:
             pass
 
-    def _is_local_model(self, model: str) -> bool:
-        """Check if a model is local (LM Studio) vs cloud (OpenRouter).
+    def _is_local_model(self, model: str = None) -> bool:
+        """Check if the active provider is local (LM Studio)."""
+        return self._active_provider == "local"
 
-        A model is local if:
-        - It was discovered from LM Studio (in _known_local_models), OR
-        - It has no '/' in its ID (simple local name like 'qwen3-8b')
-        LM Studio models can have '/' (e.g. 'lmstudio-community/qwen3-8b')
-        so the set check is essential.
-        """
-        return model in self._known_local_models or "/" not in model
+    def set_local_mode(self, base_url: str, model_id: str):
+        """Switch to LM Studio as the active provider."""
+        self._active_provider = "local"
+        self._lm_studio_base_url = base_url.rstrip("/")
+        self._selected_model = model_id
+        self.agent = None  # Force recreation
+
+    def set_cloud_mode(self, model: str):
+        """Switch to OpenRouter as the active provider."""
+        self._active_provider = "cloud"
+        self._lm_studio_base_url = None
+        self._selected_model = model
+        self.agent = None
 
     def register_local_models(self, model_ids: list):
         """Register model IDs discovered from LM Studio so routing works correctly."""
         self._known_local_models = set(model_ids)
 
-    def _ensure_model_loaded_on_gpu(self, model: str):
-        """Pre-load a local model via SDK with the user's GPU settings.
-
-        This runs synchronously before agent creation to prevent LM Studio's
-        JIT loading (which ignores GPU selection and loads on all GPUs).
-        """
-        import logging as _log
-        _dbg = _log.getLogger("hermes.bridge")
-
-        gpu_str = os.getenv("LM_STUDIO_GPU", "")
-        ctx = int(os.getenv("LM_STUDIO_CTX", "32768"))
-        flash = os.getenv("LM_STUDIO_FLASH_ATTN", "1") == "1"
-
-        # Parse GPU index from "GPU 1: RTX 3090 (24576 MiB)" format
-        gpu_index = None
-        if gpu_str.startswith("GPU "):
-            try:
-                gpu_index = int(gpu_str.split(":")[0].replace("GPU ", ""))
-            except (ValueError, IndexError):
-                pass
-
-        # If no GPU saved, auto-detect and use the first real GPU
-        if gpu_index is None:
-            try:
-                from gui.lm_studio import get_available_gpus
-                gpus = get_available_gpus()
-                real_gpus = [g for g in gpus if g.startswith("GPU")]
-                if real_gpus:
-                    gpu_index = int(real_gpus[0].split(":")[0].replace("GPU ", ""))
-                    _dbg.debug("No GPU saved, auto-detected GPU %d", gpu_index)
-            except Exception:
-                pass
-
-        if gpu_index is None:
-            _dbg.debug("No GPU available, skipping SDK pre-load")
-            return
-
-        try:
-            from gui.lm_studio import LMStudioClient, LMStudioPanel
-            url = LMStudioPanel._resolve_base_url()
-            client = LMStudioClient(base_url=url)
-            if not client.connect_sdk():
-                _dbg.debug("SDK not available, skipping pre-load")
-                return
-
-            _dbg.debug("Pre-loading %r on GPU %d, ctx=%d", model, gpu_index, ctx)
-            client.load_model(
-                model_path=model,
-                gpu_index=gpu_index,
-                context_length=ctx,
-                flash_attention=flash,
-            )
-            _dbg.debug("Pre-load complete")
-        except Exception as e:
-            _dbg.warning("Pre-load failed (JIT will be used): %s", e)
 
     def _resolve_lm_studio_url(self) -> Optional[str]:
         """Probe LM Studio and return its OpenAI-compatible base URL if running, else None.
 
-        Always returns a URL ending with /v1 — LM Studio requires the /v1 prefix
-        for chat completions (POST /v1/chat/completions).
+        Returns the URL as configured — no /v1 mangling.
         """
         try:
             from gui.lm_studio import LMStudioPanel
@@ -226,23 +179,18 @@ class AgentBridge:
             from gui.lm_studio import LMStudioClient
             client = LMStudioClient(base_url=url)
             if client.is_running():
-                url = url.rstrip("/")
-                if not url.endswith("/v1"):
-                    url += "/v1"
-                return url
+                return url.rstrip("/")
         except Exception:
             pass
         return None
 
     def _validate_startup_model(self):
-        """Check if the persisted model is local; if LM Studio isn't running, fallback.
-
-        Also probes LM Studio to discover local model IDs (which may contain '/')
-        so that _is_local_model() can recognize them later.
+        """Detect LM Studio on startup and register any discovered models.
+        Default is always cloud mode — user switches to local via UI.
         """
-        model = self.get_model()
+        self._active_provider = "cloud"
 
-        # Probe LM Studio and register any discovered models
+        # Probe LM Studio in case it's running — register models for sidebar
         url = self._resolve_lm_studio_url()
         if url:
             try:
@@ -255,21 +203,10 @@ class AgentBridge:
             except Exception:
                 pass
 
-        if not self._is_local_model(model):
-            return  # Cloud model — nothing to validate
-
-        if url:
-            self._lm_studio_base_url = url
-        else:
-            # LM Studio not running — fallback to config default cloud model
-            fallback = self.config.get("model", {}).get("default", "google/gemini-2.5-flash")
-            os.environ["LLM_MODEL"] = fallback
-            self._startup_fallback = True
-            self._startup_original_model = model
-
     def get_model(self) -> str:
-        return os.getenv("LLM_MODEL",
-                        self.config.get("model", {}).get("default", "google/gemini-2.5-flash"))
+        if not hasattr(self, '_selected_model') or not self._selected_model:
+            self._selected_model = self.config.get("model", {}).get("default", "google/gemini-2.5-flash")
+        return self._selected_model
 
     def get_api_key(self) -> str:
         return os.getenv("OPENROUTER_API_KEY", "")
@@ -283,17 +220,13 @@ class AgentBridge:
         # Only disable what's truly broken on Windows
         disabled = ["code_execution"]
 
-        # Auto-resolve LM Studio URL for local models
-        if self._is_local_model(model) and not self._lm_studio_base_url:
-            self._lm_studio_base_url = self._resolve_lm_studio_url()
-
-        # Pre-load local model via SDK with correct GPU settings
-        # This prevents JIT loading (which ignores GPU selection)
-        if self._is_local_model(model) and self._lm_studio_base_url:
-            self._ensure_model_loaded_on_gpu(model)
-
-        # Support LM Studio custom base URL for local models
-        base_url = self._lm_studio_base_url if self._is_local_model(model) else None
+        # Route based on active provider
+        if self._active_provider == "local" and self._lm_studio_base_url:
+            # OpenAI SDK expects /v1 suffix for API calls
+            lm_url = self._lm_studio_base_url.rstrip("/")
+            base_url = lm_url if lm_url.endswith("/v1") else lm_url + "/v1"
+        else:
+            base_url = None
 
         # Generate session ID
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
@@ -483,6 +416,7 @@ You are running on **{os_name} {os_release}**.
             reasoning_callback=self._on_reasoning,
             step_callback=self._on_step,
             clarify_callback=self._on_clarify,
+            stream_delta_callback=self._on_stream_delta,
         )
 
     def _post(self, callback, *args):
@@ -501,6 +435,10 @@ You are running on **{os_name} {os_release}**.
 
     def _on_reasoning(self, text):
         self._post(self.on_reasoning, text)
+
+    def _on_stream_delta(self, text):
+        """Stream text token to the GUI. None signals end-of-turn."""
+        self._post(self.on_stream_delta, text)
 
     def _on_step(self, iteration, prev_tools):
         self._post(self.on_step, iteration, prev_tools)
@@ -802,8 +740,8 @@ You are running on **{os_name} {os_release}**.
             _dbg.addHandler(_fh)
             _dbg.setLevel(_log.DEBUG)
 
-        _dbg.debug("_run_agent START model=%r base_url=%r msg=%r",
-                    self.get_model(), self._lm_studio_base_url, message[:80])
+        _dbg.debug("_run_agent START model=%r provider=%s msg=%r",
+                    self.get_model(), self._active_provider, message[:80])
 
         # Check if model is configured — if not, use guided mode
         if not self._is_model_configured():
@@ -895,21 +833,8 @@ You are running on **{os_name} {os_release}**.
         self.agent = None
 
     def set_model(self, model: str):
-        os.environ["LLM_MODEL"] = model
-        env_path = PROJECT_ROOT / ".env"
-        if env_path.exists():
-            with open(env_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            content = re.sub(r"LLM_MODEL=.*", f"LLM_MODEL={model}", content)
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.write(content)
-        # Auto-set or clear LM Studio URL based on model type
-        if self._is_local_model(model):
-            if not self._lm_studio_base_url:
-                self._lm_studio_base_url = self._resolve_lm_studio_url()
-        else:
-            self._lm_studio_base_url = None
-        self.agent = None
+        """Switch model from the sidebar dropdown — always cloud."""
+        self.set_cloud_mode(model)
 
     def get_token_usage(self) -> Dict[str, int]:
         """Get token usage from current agent."""

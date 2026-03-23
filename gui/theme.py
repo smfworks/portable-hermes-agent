@@ -9,6 +9,73 @@ from tkinter import ttk
 
 
 # ============================================================================
+# DPI Scaling
+# ============================================================================
+
+_DPI_SCALE = 1.0  # Set by init_dpi_scaling() after root window creation
+
+
+def _enable_dpi_awareness():
+    """Set process DPI awareness — must be called BEFORE creating any windows."""
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Per-monitor aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+# Call immediately at import time, before any Tk() window is created
+_enable_dpi_awareness()
+
+
+def init_dpi_scaling(root: tk.Tk):
+    """Query the actual DPI and set the global scale factor.
+
+    Call this AFTER creating the Tk root but BEFORE building any widgets.
+    On a 150% display this sets _DPI_SCALE = 1.5, etc.
+    """
+    global _DPI_SCALE
+
+    # Ask Windows what the real DPI is
+    try:
+        dpi = ctypes.windll.user32.GetDpiForWindow(
+            ctypes.windll.user32.GetParent(root.winfo_id())
+        )
+        if dpi and dpi > 0:
+            _DPI_SCALE = dpi / 96.0
+        else:
+            _DPI_SCALE = root.winfo_fpixels('1i') / 96.0
+    except Exception:
+        try:
+            _DPI_SCALE = root.winfo_fpixels('1i') / 96.0
+        except Exception:
+            _DPI_SCALE = 1.0
+
+    # Clamp to reasonable range
+    _DPI_SCALE = max(1.0, min(_DPI_SCALE, 4.0))
+
+    # Rebuild font sizes with the actual scale factor
+    init_fonts()
+
+
+def S(px: int) -> int:
+    """Scale a pixel value by the DPI factor."""
+    return int(px * _DPI_SCALE)
+
+
+def F(pt: int) -> int:
+    """Scale a font point size by the DPI factor."""
+    return max(1, int(pt * _DPI_SCALE))
+
+
+def SF(family: str, size: int, *args) -> tuple:
+    """Build a DPI-scaled font tuple: SF("Segoe UI", 10, "bold") -> ("Segoe UI", 15, "bold") at 150%."""
+    return (family, F(size)) + args
+
+
+# ============================================================================
 # Color Palettes
 # ============================================================================
 
@@ -21,35 +88,35 @@ DARK = {
     "bg_hover": "#383838",
     "bg_selected": "#404040",
 
-    # Text
-    "text_primary": "#e0e0e0",
-    "text_secondary": "#b0b0b0",
-    "text_hint": "#a0a0a0",
-    "text_disabled": "#707070",
+    # Text — bright enough to read against dark backgrounds
+    "text_primary": "#f0f0f0",
+    "text_secondary": "#c8c8c8",
+    "text_hint": "#b0b0b0",
+    "text_disabled": "#888888",
 
     # Accent
-    "accent": "#3b9eff",
-    "accent_dark": "#2d7fd4",
+    "accent": "#5ab0ff",
+    "accent_dark": "#3d94e0",
     "accent_light": "#1a3a52",
 
-    # Status
-    "success": "#81C784",
-    "success_dark": "#66BB6A",
-    "warning": "#FFCC80",
-    "warning_dark": "#FFB74D",
-    "danger": "#FF8A80",
-    "danger_dark": "#FF6B6B",
-    "info": "#42A5F5",
+    # Status — brighter for readability on dark backgrounds
+    "success": "#90EE90",
+    "success_dark": "#7CDB7C",
+    "warning": "#FFD699",
+    "warning_dark": "#FFC266",
+    "danger": "#FF9E9E",
+    "danger_dark": "#FF7C7C",
+    "info": "#64B5F6",
 
     # Borders
-    "border": "#444444",
-    "border_light": "#3a3a3a",
-    "border_dark": "#555555",
-    "separator": "#404040",
+    "border": "#505050",
+    "border_light": "#444444",
+    "border_dark": "#666666",
+    "separator": "#454545",
 
     # Scrollbar
     "scrollbar_bg": "#2a2a2a",
-    "scrollbar_fg": "#555555",
+    "scrollbar_fg": "#606060",
 
     # Misc
     "treeview_alt": "#262626",
@@ -58,18 +125,32 @@ DARK = {
 
     # Message bubbles (Hermes-specific)
     "msg_user": "#1a3a52",
-    "msg_user_border": "#2d7fd4",
+    "msg_user_border": "#3d94e0",
     "msg_ai": "#1e2e1e",
-    "msg_ai_border": "#3a6a3a",
+    "msg_ai_border": "#4a8a4a",
     "msg_tool": "#2e2a1a",
-    "msg_tool_border": "#5a4a2a",
+    "msg_tool_border": "#6a5a3a",
     "msg_system": "#2a2a2a",
-    "msg_system_border": "#444444",
+    "msg_system_border": "#555555",
     "msg_error": "#3a1a1a",
-    "msg_error_border": "#FF6B6B",
+    "msg_error_border": "#FF7C7C",
 }
 
-# Fonts
+# Base font sizes (design units) — scaled by F() at init
+_FONT_SIZES = {
+    "heading": 13,
+    "subheading": 11,
+    "body": 10,
+    "small": 9,
+    "mono": 10,
+    "mono_small": 9,
+    "button": 10,
+    "title": 16,
+    "logo": 24,
+    "logo_sub": 14,
+}
+
+# Fonts — rebuilt by init_fonts() after DPI is known
 FONTS = {
     "heading": ("Segoe UI", 13, "bold"),
     "subheading": ("Segoe UI", 11, "bold"),
@@ -82,6 +163,21 @@ FONTS = {
     "logo": ("Segoe UI", 24, "bold"),
     "logo_sub": ("Segoe UI", 14),
 }
+
+
+def init_fonts():
+    """Rebuild FONTS dict with DPI-scaled point sizes."""
+    FONTS["heading"] = ("Segoe UI", F(_FONT_SIZES["heading"]), "bold")
+    FONTS["subheading"] = ("Segoe UI", F(_FONT_SIZES["subheading"]), "bold")
+    FONTS["body"] = ("Segoe UI", F(_FONT_SIZES["body"]))
+    FONTS["small"] = ("Segoe UI", F(_FONT_SIZES["small"]))
+    FONTS["mono"] = ("Consolas", F(_FONT_SIZES["mono"]))
+    FONTS["mono_small"] = ("Consolas", F(_FONT_SIZES["mono_small"]))
+    FONTS["button"] = ("Segoe UI", F(_FONT_SIZES["button"]), "bold")
+    FONTS["title"] = ("Segoe UI", F(_FONT_SIZES["title"]), "bold")
+    FONTS["logo"] = ("Segoe UI", F(_FONT_SIZES["logo"]), "bold")
+    FONTS["logo_sub"] = ("Segoe UI", F(_FONT_SIZES["logo_sub"]))
+
 
 # Active color set
 C = DARK
@@ -96,27 +192,50 @@ def get_color(key: str) -> str:
 # ============================================================================
 
 def set_dark_title_bar(window):
-    """Enable dark title bar on Windows 10/11 via DwmSetWindowAttribute."""
+    """Enable dark title bar on Windows 10/11 via DwmSetWindowAttribute.
+
+    To avoid the white title-bar flash, we:
+    1. Start the window withdrawn (hidden)
+    2. Apply the dark attribute
+    3. Then show (deiconify) the window
+    """
     try:
-        window.update()
+        # Hide window before it renders with a white title bar
+        was_withdrawn = window.state() == 'withdrawn'
+        if not was_withdrawn:
+            window.withdraw()
+
+        window.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
         value = ctypes.c_int(1)
+        # Attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, 20, ctypes.byref(value), ctypes.sizeof(value)
         )
+
+        if not was_withdrawn:
+            window.deiconify()
     except Exception:
-        pass
+        # Make sure we always show the window even if DWM fails
+        try:
+            window.deiconify()
+        except Exception:
+            pass
 
 
 def center_window(window, width=None, height=None, parent=None):
     """Center a window on screen or over its parent window.
 
+    *width* and *height* are in logical (design) pixels — they are
+    automatically scaled by the DPI factor so windows look the same
+    physical size on every display.
+
     If *parent* is given (and visible), the window is centered over the parent.
     Otherwise it is centered on the primary monitor.
     """
     window.update_idletasks()
-    w = width or window.winfo_width()
-    h = height or window.winfo_height()
+    w = S(width) if width else window.winfo_width()
+    h = S(height) if height else window.winfo_height()
 
     if parent is not None:
         # Center over parent
@@ -128,7 +247,6 @@ def center_window(window, width=None, height=None, parent=None):
             x = px + (pw - w) // 2
             y = py + (ph - h) // 2
         except Exception:
-            # Fallback to screen center
             x = (window.winfo_screenwidth() - w) // 2
             y = (window.winfo_screenheight() - h) // 2
     else:

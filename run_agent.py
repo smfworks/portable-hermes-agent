@@ -823,11 +823,14 @@ class AIAgent:
             if fb_p and fb_m and not self.quiet_mode:
                 print(f"🔄 Fallback model: {fb_m} ({fb_p})")
 
-        # Get available tools with filtering
+        # Get available tools with filtering.
+        # GUI skips check_fn validation to avoid 20+ second startup delays
+        # from network timeouts — tools fail at call time instead.
         self.tools = get_tool_definitions(
             enabled_toolsets=enabled_toolsets,
             disabled_toolsets=disabled_toolsets,
             quiet_mode=self.quiet_mode,
+            skip_checks=(self.platform == "gui"),
         )
         
         # Show tool configuration and store valid tool names for validation

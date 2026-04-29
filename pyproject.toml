@@ -3,13 +3,22 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-agent"
-version = "0.4.0"
-description = "The self-improving AI agent — creates skills from experience, improves them during use, and runs anywhere"
+name = "smf-forge-desktop"
+version = "0.1.0"
+description = "SMF Forge Desktop — portable AI agent for Windows with 100+ tools, GUI, and local model support"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Nous Research" }]
+authors = [{ name = "Nous Research" }, { name = "SMF Works", email = "michael@smfworks.com" }]
 license = { text = "MIT" }
+keywords = ["ai-agent", "desktop", "portable", "windows", "local-ai", "smf-works"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   # Core
   "openai",

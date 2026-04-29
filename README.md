@@ -1,8 +1,12 @@
-# Portable Hermes Agent
+# SMF Forge Desktop
 
-**Portable AI agent desktop for Windows** — 100 tools, GUI, local models via LM Studio, TTS, Music, ComfyUI, workflows, tool maker. No install. No Docker. No admin rights.
+**Portable AI agent desktop for Windows** — 100+ tools, GUI, local models via LM Studio, TTS, Music, ComfyUI, workflows, and tool maker. No install. No Docker. No admin rights.
 
-Built on [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) (MIT License) with extensive customization for non-technical users.
+A [SMF Works](https://smfworks.com) product.
+
+> **Upstream:** Based on [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and [aivrar/portable-hermes-agent](https://github.com/aivrar/portable-hermes-agent), both under the MIT License.
+> Original copyright: (c) 2025 Nous Research.
+> SMF Works modifications and extensions: (c) 2026 SMF Works.
 
 ---
 

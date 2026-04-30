@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smf-forge-desktop"
-version = "0.1.0"
+version = "0.1.2"
 description = "SMF Forge Desktop — portable AI agent for Windows with 100+ tools, GUI, and local model support"
 readme = "README.md"
 requires-python = ">=3.11"

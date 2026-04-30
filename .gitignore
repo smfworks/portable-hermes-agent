@@ -38,7 +38,9 @@ agent-browser/
 privvy*
 images/
 __pycache__/
-hermes_agent.egg-info/
+build/
+dist/
+*.egg-info/
 wandb/
 testlogs
 

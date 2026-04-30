@@ -28,6 +28,123 @@ from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Safe expression evaluator for workflow conditions
+# ---------------------------------------------------------------------------
+import ast
+import operator
+
+_SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+    ast.Mod: operator.mod,
+    ast.USub: operator.neg,
+    ast.UAdd: operator.pos,
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.And: lambda a, b: a and b,
+    ast.Or: lambda a, b: a or b,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
+    ast.Is: lambda a, b: a is b,
+    ast.IsNot: lambda a, b: a is not b,
+}
+
+_SAFE_NAMES = {
+    "True": True,
+    "False": False,
+    "None": None,
+    "len": len,
+    "bool": bool,
+    "int": int,
+    "float": float,
+    "str": str,
+    "list": list,
+    "dict": dict,
+    "abs": abs,
+    "min": min,
+    "max": max,
+    "sum": sum,
+    "any": any,
+    "all": all,
+}
+
+
+def _safe_eval_condition(expr: str):
+    """Evaluate a restricted expression for workflow conditions.
+
+    Supported: numbers, strings, booleans, None, comparisons,
+    arithmetic, "in" / "not in", "and", "or", calls to whitelisted builtins.
+    """
+    tree = ast.parse(expr, mode="eval")
+    return _eval_node(tree.body)
+
+
+def _eval_node(node):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Num):  # Python < 3.8 compat
+        return node.n
+    if isinstance(node, ast.Str):  # Python < 3.8 compat
+        return node.s
+    if isinstance(node, ast.Name):
+        if node.id in _SAFE_NAMES:
+            return _SAFE_NAMES[node.id]
+        raise NameError(f"Name {node.id!r} is not allowed")
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.BinOp):
+        op_type = type(node.op)
+        if op_type not in _SAFE_OPS:
+            raise TypeError(f"Unsupported binary operator: {op_type.__name__}")
+        return _SAFE_OPS[op_type](_eval_node(node.left), _eval_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        op_type = type(node.op)
+        if op_type not in _SAFE_OPS:
+            raise TypeError(f"Unsupported unary operator: {op_type.__name__}")
+        return _SAFE_OPS[op_type](_eval_node(node.operand))
+    if isinstance(node, ast.Compare):
+        left = _eval_node(node.left)
+        for op, comparator in zip(node.ops, node.comparators):
+            op_type = type(op)
+            if op_type not in _SAFE_OPS:
+                raise TypeError(f"Unsupported comparison: {op_type.__name__}")
+            left = _SAFE_OPS[op_type](left, _eval_node(comparator))
+        return left
+    if isinstance(node, ast.BoolOp):
+        values = [_eval_node(v) for v in node.values]
+        op_type = type(node.op)
+        if op_type not in _SAFE_OPS:
+            raise TypeError(f"Unsupported boolean operator: {op_type.__name__}")
+        result = values[0]
+        for v in values[1:]:
+            result = _SAFE_OPS[op_type](result, v)
+        return result
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id in _SAFE_NAMES:
+            args = [_eval_node(a) for a in node.args]
+            kwargs = {kw.arg: _eval_node(kw.value) for kw in node.keywords}
+            return _SAFE_NAMES[node.func.id](*args, **kwargs)
+        raise TypeError("Only whitelisted function calls are allowed")
+    if isinstance(node, ast.List):
+        return [_eval_node(e) for e in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_eval_node(e) for e in node.elts)
+    if isinstance(node, ast.Set):
+        return {_eval_node(e) for e in node.elts}
+    if isinstance(node, ast.Dict):
+        return {_eval_node(k): _eval_node(v) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.IfExp):
+        return _eval_node(node.body) if _eval_node(node.test) else _eval_node(node.orelse)
+    raise TypeError(f"Unsupported expression type: {type(node).__name__}")
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW_DIR = _PROJECT_ROOT / "workflows"
 
@@ -140,14 +257,12 @@ def _evaluate_condition(condition: str, context: dict) -> bool:
     # Resolve templates in the condition
     resolved = _resolve_template(condition, context)
 
-    # Simple evaluations
+    # Safe evaluation — restricted AST-based expression evaluator
     try:
-        # Safe subset: comparisons and basic logic
-        # e.g. "5 > 0", "true", "false", "'value' != ''"
-        result = eval(resolved, {"__builtins__": {}}, {})
+        result = _safe_eval_condition(resolved)
         return bool(result)
     except Exception:
-        # If eval fails, treat non-empty as True
+        # If safe eval fails, treat non-empty as True
         return bool(resolved.strip())
 
 

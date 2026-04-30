@@ -46,20 +46,34 @@ jobs:
       - name: Upgrade build tools
         run: python -m pip install --upgrade pip wheel setuptools
 
-      - name: Install core + build dependencies
+      - name: Install core dependencies
+        # NOTE: We do NOT run 'pip install -e .' because pyproject.toml
+        # extras reference git-based packages (atropos, tinker, yc-bench) that
+        # fail on Windows CI. We only install the concrete runtime deps.
         run: |
           python -m pip install openai anthropic httpx rich tenacity prompt_toolkit pyyaml requests jinja2 pydantic fire python-dotenv
           python -m pip install edge-tts faster-whisper litellm typer platformdirs PyJWT fal-client firecrawl-py parallel-web croniter
           python -m pip install python-telegram-bot discord.py aiohttp slack-bolt slack-sdk
+
+      - name: Install build + test tools
+        run: |
           python -m pip install pytest pytest-asyncio pytest-xdist mcp pyinstaller black
 
       # ------------------------------------------------------------------
-      # Lint / safety checks
+      # Pre-build checks
       # ------------------------------------------------------------------
+      - name: List installed packages
+        shell: pwsh
+        run: |
+          pip list --format=freeze | Out-File -Encoding utf8 installed_packages.txt
+          Get-Content installed_packages.txt
+
       - name: Quick import smoke test
         shell: pwsh
         run: |
-          python -c "import gui.app; import cli; import run_agent; print('Import OK')"
+          python -c "import gui.app; print('gui.app OK')"
+          python -c "import cli; print('cli OK')"
+          python -c "import run_agent; print('run_agent OK')"
 
       - name: Run security regression tests
         shell: pwsh
@@ -71,13 +85,23 @@ jobs:
       # ------------------------------------------------------------------
       - name: Build executable with PyInstaller
         shell: pwsh
-        run: pyinstaller smf-forge-desktop.spec --clean --noconfirm
+        run: |
+          # Verbose build for debugging CI failures
+          pyinstaller smf-forge-desktop.spec --clean --noconfirm --log-level INFO
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "=== PyInstaller build failed. Retrying with DEBUG output... ==="
+            pyinstaller smf-forge-desktop.spec --clean --noconfirm --log-level DEBUG
+          }
 
       - name: Verify output
         shell: pwsh
         run: |
           $exe = "dist\smf-forge-desktop.exe"
-          if (!(Test-Path $exe)) { throw "Build failed — $exe not found" }
+          if (!(Test-Path $exe)) {
+            Write-Host "=== Build artifacts ==="
+            Get-ChildItem -Recurse build/ -ErrorAction SilentlyContinue | Select-Object FullName, Length | Sort-Object Length -Descending | Select-Object -First 20
+            throw "Build failed — $exe not found"
+          }
           $item = Get-Item $exe
           $mb = [math]::Round($item.Length / 1MB, 2)
           Write-Host "Executable: $($item.Name)"

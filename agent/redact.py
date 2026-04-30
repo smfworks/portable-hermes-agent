@@ -37,10 +37,13 @@ _PREFIX_PATTERNS = [
     r"dop_v1_[A-Za-z0-9]{10,}",         # DigitalOcean PAT
     r"doo_v1_[A-Za-z0-9]{10,}",         # DigitalOcean OAuth
     r"am_[A-Za-z0-9_-]{10,}",           # AgentMail API key
+    r"ollama_[A-Za-z0-9]{10,}",         # Ollama API key
+    # Generic env variable redaction: anything ending in _API_KEY, _SECRET, etc.
+    # is handled by _ENV_ASSIGN_RE above
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+_SECRET_ENV_NAMES = r"(?:API_?KEY|SECRET|TOKEN|PASSWORD|AUTH|CREDENTIALS|PRIVATE_KEY|ACCESS_KEY|OLLAMA)"
 _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z_]*{_SECRET_ENV_NAMES}[A-Z_]*)\s*=\s*(['\"]?)(\S+)\2",
     re.IGNORECASE,

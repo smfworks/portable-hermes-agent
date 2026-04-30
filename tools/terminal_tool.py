@@ -99,8 +99,9 @@ def _check_disk_usage_warning():
         return False
 
 
-# Session-cached sudo password (persists until CLI exits)
-_cached_sudo_password: str = ""
+# Session-cached sudo password — scoped per-thread to prevent leakage
+# between concurrent sessions (e.g. gateway + CLI running simultaneously).
+_thread_local = threading.local()
 
 # Optional UI callbacks for interactive prompts. When set, these are called
 # instead of the default /dev/tty or input() readers. The CLI registers these
@@ -329,15 +330,16 @@ def _transform_sudo_command(command: str) -> tuple[str, str | None]:
     If SUDO_PASSWORD is not set and NOT interactive:
       Command runs as-is (fails gracefully with "sudo: a password is required").
     """
-    global _cached_sudo_password
+    global _thread_local
     import re
 
     # Check if command even contains sudo
     if not re.search(r'\bsudo\b', command):
         return command, None  # No sudo in command, nothing to do
 
-    # Try to get password from: env var -> session cache -> interactive prompt
-    sudo_password = os.getenv("SUDO_PASSWORD", "") or _cached_sudo_password
+    # Try to get password from: env var -> thread-local cache -> interactive prompt
+    cached = getattr(_thread_local, "sudo_password", "")
+    sudo_password = os.getenv("SUDO_PASSWORD", "") or cached
 
     if not sudo_password:
         # No password configured - check if we're in interactive mode
@@ -345,7 +347,7 @@ def _transform_sudo_command(command: str) -> tuple[str, str | None]:
             # Prompt user for password
             sudo_password = _prompt_for_sudo_password(timeout_seconds=45)
             if sudo_password:
-                _cached_sudo_password = sudo_password  # Cache for session
+                _thread_local.sudo_password = sudo_password  # Thread-local cache
 
     if not sudo_password:
         return command, None  # No password, let it fail gracefully

@@ -5182,12 +5182,13 @@ class HermesCLI:
         with self._approval_lock:
             timeout = 60
             response_queue = queue.Queue()
+            choices = self._approval_choices(command, allow_permanent=allow_permanent)
 
             self._approval_state = {
                 "command": command,
                 "description": description,
-                "choices": self._approval_choices(command, allow_permanent=allow_permanent),
-                "selected": 0,
+                "choices": choices,
+                "selected": len(choices) - 1,  # default to "deny" — must intentionally navigate up
                 "response_queue": response_queue,
             }
             self._approval_deadline = _time.monotonic() + timeout

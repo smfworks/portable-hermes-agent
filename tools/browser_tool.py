@@ -74,6 +74,14 @@ from tools.browser_providers.base import CloudBrowserProvider
 from tools.browser_providers.browserbase import BrowserbaseProvider
 from tools.browser_providers.browser_use import BrowserUseProvider
 
+try:
+    from tools.url_safety import is_safe_url, maybe_block_url
+except Exception:
+    def is_safe_url(url, **kw):
+        return True, ""
+    def maybe_block_url(url):
+        return None
+
 logger = logging.getLogger(__name__)
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services)
@@ -955,6 +963,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": blocked["message"],
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
+
+    # SSRF protection — block private IPs, cloud metadata, and DNS-rebinding targets
+    url_blocked = maybe_block_url(url)
+    if url_blocked:
+        return json.dumps(url_blocked, ensure_ascii=False)
 
     effective_task_id = task_id or "default"
     

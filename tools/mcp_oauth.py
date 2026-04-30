@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import socket
 import threading
 import webbrowser
@@ -29,6 +30,32 @@ from urllib.parse import parse_qs, urlparse
 logger = logging.getLogger(__name__)
 
 _TOKEN_DIR_NAME = "mcp-tokens"
+
+# ---------------------------------------------------------------------------
+# CSRF protection: store expected state tokens keyed by server name
+# ---------------------------------------------------------------------------
+_STATE_STORE: dict[str, str] = {}
+_STATE_LOCK = threading.Lock()
+
+
+def _generate_state() -> str:
+    """Generate a 32-byte URL-safe random state parameter."""
+    return secrets.token_urlsafe(32)
+
+
+def _store_state(server_name: str, state: str) -> None:
+    with _STATE_LOCK:
+        _STATE_STORE[_sanitize_server_name(server_name)] = state
+
+
+def _verify_and_clear_state(server_name: str, received: str | None) -> bool:
+    """Return True if received state matches the stored expectation, then clear it."""
+    if not received:
+        return False
+    key = _sanitize_server_name(server_name)
+    with _STATE_LOCK:
+        expected = _STATE_STORE.pop(key, None)
+    return expected is not None and secrets.compare_digest(expected, received)
 
 
 # ---------------------------------------------------------------------------

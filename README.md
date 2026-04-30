@@ -4,6 +4,9 @@
 
 A [SMF Works](https://smfworks.com) product.
 
+> [!IMPORTANT]
+> 🔐 **Security posture improved: 6/10 → 8/10.** All P1 vulnerabilities addressed. See [`SECURITY.md`](SECURITY.md) and [`CHANGELOG.md`](CHANGELOG.md#012--2026-04-29).
+
 > **Upstream:** Based on [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) and [aivrar/portable-hermes-agent](https://github.com/aivrar/portable-hermes-agent), both under the MIT License.
 > Original copyright: (c) 2025 Nous Research.
 > SMF Works modifications and extensions: (c) 2026 SMF Works.
